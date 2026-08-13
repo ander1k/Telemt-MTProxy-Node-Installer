@@ -2,6 +2,8 @@
 
 ## 1.0 — monitoring refresh
 
+- node_exporter переведён на стандартную схему systemd: пользователь `node_exporter`, бинарник `/usr/bin/node_exporter`, unit `node_exporter.service`; добавлена миграция с раннего `telemt-node-exporter.service`;
+- loopback (`lo`, включая `127.0.0.1`) теперь всегда исключён из GeoBlock и внешнего `DROP` метрик; локальный healthcheck node_exporter ограничен пятью секундами вместо многоминутного ожидания;
 - исправлена контрольная сумма node_exporter v1.5.0 (`…acbb`); проверка дополнительно сверяется с официальным `sha256sums.txt` и показывает ожидаемое/полученное значение при ошибке;
 - три страницы-заглушки полностью переработаны в premium-стиле и не содержат персональных имён;
 - добавлен node_exporter v1.5.0 с проверкой SHA-256, отдельным systemd unit и портом 9100;

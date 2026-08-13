@@ -79,6 +79,10 @@ existing_stack_owns_port() {
        grep -Eq -- "--web.listen-address=[^[:space:]]*:${port}([[:space:]]|$)" /etc/systemd/system/telemt-node-exporter.service 2>/dev/null; then
         return 0
     fi
+    if [[ -e /opt/telemt/node-exporter/.installer-owned ]] && systemctl is-active --quiet node_exporter.service 2>/dev/null && \
+       grep -Eq -- "--web.listen-address=[^[:space:]]*:${port}([[:space:]]|$)" /etc/systemd/system/node_exporter.service 2>/dev/null; then
+        return 0
+    fi
     command -v docker >/dev/null 2>&1 || return 1
     for container in telemt telemt-stub geo-exporter; do
         pid=$(docker inspect -f '{{.State.Pid}}' "$container" 2>/dev/null || true)
@@ -527,9 +531,9 @@ fi
 if [[ -f "$CONFIG_DIR/config.toml" ]]; then
     BACKUP_FILE="$INSTALL_ROOT/backups/pre-install-$(date +%Y%m%d-%H%M%S).tar.gz"
     BACKUP_ITEMS=()
-    for item in opt/telemt/config opt/telemt/.env opt/telemt/docker-compose.yml opt/telemt/bin opt/telemt/node-exporter opt/telemt/install.sh opt/telemt/update.sh opt/telemt/uninstall.sh opt/telemt/doctor.sh opt/telemt/backup.sh opt/telemt/VERSION opt/telemt/INSTALLATION-SUMMARY.txt opt/telemt/README.md opt/telemt/LICENSE opt/telemt/CHANGELOG.md; do [[ -e "/$item" ]] && BACKUP_ITEMS+=("$item"); done
+    for item in opt/telemt/config opt/telemt/.env opt/telemt/docker-compose.yml opt/telemt/bin opt/telemt/node-exporter usr/bin/node_exporter opt/telemt/install.sh opt/telemt/update.sh opt/telemt/uninstall.sh opt/telemt/doctor.sh opt/telemt/backup.sh opt/telemt/VERSION opt/telemt/INSTALLATION-SUMMARY.txt opt/telemt/README.md opt/telemt/LICENSE opt/telemt/CHANGELOG.md; do [[ -e "/$item" ]] && BACKUP_ITEMS+=("$item"); done
     [[ -d /opt/telemt/stub ]] && BACKUP_ITEMS+=(opt/telemt/stub)
-    for unit in etc/systemd/system/telemt-firewall.service etc/systemd/system/telemt-geoblock.service etc/systemd/system/telemt-geoblock.timer etc/systemd/system/telemt-stub-cert.service etc/systemd/system/telemt-stub-cert.timer etc/systemd/system/telemt-node-exporter.service; do [[ -f "/$unit" ]] && BACKUP_ITEMS+=("$unit"); done
+    for unit in etc/systemd/system/telemt-firewall.service etc/systemd/system/telemt-geoblock.service etc/systemd/system/telemt-geoblock.timer etc/systemd/system/telemt-stub-cert.service etc/systemd/system/telemt-stub-cert.timer etc/systemd/system/telemt-node-exporter.service etc/systemd/system/node_exporter.service; do [[ -f "/$unit" ]] && BACKUP_ITEMS+=("$unit"); done
     tar -czf "$BACKUP_FILE" -C / "${BACKUP_ITEMS[@]}" 2>/dev/null || true
     ok "Предыдущая установка сохранена: $BACKUP_FILE"
 fi
@@ -939,6 +943,9 @@ apply_family() {
     "$cmd" -N "$chain" 2>/dev/null || true
     "$cmd" -C INPUT -j "$chain" 2>/dev/null || "$cmd" -I INPUT 1 -j "$chain"
     "$cmd" -F "$chain"
+    # Локальные API и healthcheck никогда не должны попадать под GeoBlock
+    # или под DROP внешних портов мониторинга.
+    "$cmd" -A "$chain" -i lo -j RETURN
     for ssh_port in $SSH_PORTS; do "$cmd" -A "$chain" -p tcp --dport "$ssh_port" -j RETURN; done
     if [[ -n "$ADMIN_IP" && "$ADMIN_IP" == *.* && "$family" == 4 ]]; then admin_exclude=(! -s "$ADMIN_IP"); fi
     if [[ -n "$ADMIN_IP" && "$ADMIN_IP" == *:* && "$family" == 6 ]]; then admin_exclude=(! -s "$ADMIN_IP"); fi
@@ -1219,6 +1226,9 @@ fi
 
 step "Node Exporter"
 if [[ "$NODE_EXPORTER_ENABLE" == true ]]; then
+    if [[ -e /etc/systemd/system/node_exporter.service && ! -e "$INSTALL_ROOT/node-exporter/.installer-owned" ]]; then
+        die "Обнаружен сторонний /etc/systemd/system/node_exporter.service; установщик не будет его перезаписывать"
+    fi
     NODE_ARCHIVE="node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64.tar.gz"
     NODE_URL="https://github.com/prometheus/node_exporter/releases/download/v${NODE_EXPORTER_VERSION}/${NODE_ARCHIVE}"
     NODE_SUMS_URL="https://github.com/prometheus/node_exporter/releases/download/v${NODE_EXPORTER_VERSION}/sha256sums.txt"
@@ -1238,20 +1248,29 @@ if [[ "$NODE_EXPORTER_ENABLE" == true ]]; then
     ok "SHA-256 node_exporter подтверждена официальным sha256sums.txt"
     tar -xzf "$NODE_TMP/$NODE_ARCHIVE" -C "$NODE_TMP"
     mkdir -p "$INSTALL_ROOT/node-exporter"
-    install -m 0755 "$NODE_TMP/node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64/node_exporter" "$INSTALL_ROOT/node-exporter/node_exporter"
+    if ! id node_exporter >/dev/null 2>&1; then
+        useradd -r -M -s /bin/false node_exporter
+        touch "$INSTALL_ROOT/node-exporter/.installer-created-user"
+    fi
+    touch "$INSTALL_ROOT/node-exporter/.installer-owned"
+    install -o node_exporter -g node_exporter -m 0755 "$NODE_TMP/node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64/node_exporter" /usr/bin/node_exporter
+    [[ -e "$INSTALL_ROOT/node-exporter/node_exporter" ]] && unlink "$INSTALL_ROOT/node-exporter/node_exporter"
     rm -rf -- "$NODE_TMP"
     NODE_LISTEN=127.0.0.1; [[ "$METRICS_REMOTE" == true ]] && NODE_LISTEN=0.0.0.0
-    cat > /etc/systemd/system/telemt-node-exporter.service <<EOF
+    # Миграция с unit ранней сборки установщика.
+    systemctl disable --now telemt-node-exporter.service >/dev/null 2>&1 || true
+    [[ -e /etc/systemd/system/telemt-node-exporter.service ]] && unlink /etc/systemd/system/telemt-node-exporter.service
+    cat > /etc/systemd/system/node_exporter.service <<EOF
 [Unit]
-Description=Telemt Node Exporter v${NODE_EXPORTER_VERSION}
+Description=Prometheus Node Exporter v${NODE_EXPORTER_VERSION}
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
-Group=root
-ExecStart=${INSTALL_ROOT}/node-exporter/node_exporter --web.listen-address=${NODE_LISTEN}:${NODE_EXPORTER_PORT} --web.telemetry-path=/metrics
+User=node_exporter
+Group=node_exporter
+ExecStart=/usr/bin/node_exporter --web.listen-address=${NODE_LISTEN}:${NODE_EXPORTER_PORT} --web.telemetry-path=/metrics
 Restart=on-failure
 RestartSec=5s
 NoNewPrivileges=true
@@ -1267,24 +1286,35 @@ LockPersonality=true
 [Install]
 WantedBy=multi-user.target
 EOF
-    chmod 644 /etc/systemd/system/telemt-node-exporter.service
+    chmod 644 /etc/systemd/system/node_exporter.service
     systemctl daemon-reload
-    systemctl enable --now telemt-node-exporter.service >/dev/null
+    systemctl enable --now node_exporter.service >/dev/null
+    if ! systemctl is-active --quiet node_exporter.service; then
+        systemctl status node_exporter.service --no-pager -l || true
+        journalctl -u node_exporter.service -n 30 --no-pager || true
+        die "Сервис node_exporter не запустился"
+    fi
     NODE_READY=false
     for _ in {1..20}; do
-        if curl -fsS "http://127.0.0.1:${NODE_EXPORTER_PORT}/metrics" | grep -q '^node_uname_info'; then NODE_READY=true; break; fi
+        if curl --noproxy '*' -fsS --connect-timeout 2 --max-time 5 "http://127.0.0.1:${NODE_EXPORTER_PORT}/metrics" | awk '/^node_uname_info/{found=1} END{exit(found?0:1)}'; then NODE_READY=true; break; fi
         sleep 1
     done
     if [[ "$NODE_READY" != true ]]; then
-        systemctl status telemt-node-exporter.service --no-pager -l || true
-        journalctl -u telemt-node-exporter.service -n 30 --no-pager || true
+        systemctl status node_exporter.service --no-pager -l || true
+        journalctl -u node_exporter.service -n 30 --no-pager || true
         die "node_exporter не прошёл проверку /metrics"
     fi
     ok "node_exporter v${NODE_EXPORTER_VERSION} активен на ${NODE_LISTEN}:${NODE_EXPORTER_PORT}"
 else
     systemctl disable --now telemt-node-exporter.service >/dev/null 2>&1 || true
     [[ -e /etc/systemd/system/telemt-node-exporter.service ]] && unlink /etc/systemd/system/telemt-node-exporter.service
-    [[ -d "$INSTALL_ROOT/node-exporter" ]] && rm -rf -- "$INSTALL_ROOT/node-exporter"
+    if [[ -e "$INSTALL_ROOT/node-exporter/.installer-owned" ]]; then
+        systemctl disable --now node_exporter.service >/dev/null 2>&1 || true
+        [[ -e /etc/systemd/system/node_exporter.service ]] && unlink /etc/systemd/system/node_exporter.service
+        [[ -e /usr/bin/node_exporter ]] && unlink /usr/bin/node_exporter
+        if [[ -e "$INSTALL_ROOT/node-exporter/.installer-created-user" ]]; then userdel node_exporter >/dev/null 2>&1 || true; fi
+        rm -rf -- "$INSTALL_ROOT/node-exporter"
+    fi
     systemctl daemon-reload
 fi
 
@@ -1328,8 +1358,9 @@ backup() {
     for doc in opt/telemt/README.md opt/telemt/LICENSE opt/telemt/CHANGELOG.md; do [[ -f "/$doc" ]] && items+=("$doc"); done
     [[ -d /opt/telemt/stub ]] && items+=(opt/telemt/stub)
     [[ -d /opt/telemt/node-exporter ]] && items+=(opt/telemt/node-exporter)
+    [[ -f /usr/bin/node_exporter ]] && items+=(usr/bin/node_exporter)
     local unit
-    for unit in etc/systemd/system/telemt-firewall.service etc/systemd/system/telemt-geoblock.service etc/systemd/system/telemt-geoblock.timer etc/systemd/system/telemt-geoblock-resume.service etc/systemd/system/telemt-geoblock-resume.timer etc/systemd/system/telemt-stub-cert.service etc/systemd/system/telemt-stub-cert.timer etc/systemd/system/telemt-node-exporter.service; do [[ -f "/$unit" ]] && items+=("$unit"); done
+    for unit in etc/systemd/system/telemt-firewall.service etc/systemd/system/telemt-geoblock.service etc/systemd/system/telemt-geoblock.timer etc/systemd/system/telemt-geoblock-resume.service etc/systemd/system/telemt-geoblock-resume.timer etc/systemd/system/telemt-stub-cert.service etc/systemd/system/telemt-stub-cert.timer etc/systemd/system/telemt-node-exporter.service etc/systemd/system/node_exporter.service; do [[ -f "/$unit" ]] && items+=("$unit"); done
     mkdir -p "$ROOT/backups"; tar -czf "$out" -C / "${items[@]}"; chmod 600 "$out"; echo "$out"
 }
 valid_backup() {
@@ -1337,7 +1368,7 @@ valid_backup() {
     while IFS= read -r entry; do
         [[ "$entry" == /* || "$entry" == *".."* ]] && return 1
         case "$entry" in
-            opt/telemt/config|opt/telemt/config/*|opt/telemt/.env|opt/telemt/docker-compose.yml|opt/telemt/bin|opt/telemt/bin/*|opt/telemt/node-exporter|opt/telemt/node-exporter/*|opt/telemt/install.sh|opt/telemt/update.sh|opt/telemt/uninstall.sh|opt/telemt/doctor.sh|opt/telemt/backup.sh|opt/telemt/VERSION|opt/telemt/INSTALLATION-SUMMARY.txt|opt/telemt/README.md|opt/telemt/LICENSE|opt/telemt/CHANGELOG.md|opt/telemt/stub|opt/telemt/stub/*|etc/systemd/system/telemt-firewall.service|etc/systemd/system/telemt-geoblock.service|etc/systemd/system/telemt-geoblock.timer|etc/systemd/system/telemt-geoblock-resume.service|etc/systemd/system/telemt-geoblock-resume.timer|etc/systemd/system/telemt-stub-cert.service|etc/systemd/system/telemt-stub-cert.timer|etc/systemd/system/telemt-node-exporter.service) found=true ;;
+            opt/telemt/config|opt/telemt/config/*|opt/telemt/.env|opt/telemt/docker-compose.yml|opt/telemt/bin|opt/telemt/bin/*|opt/telemt/node-exporter|opt/telemt/node-exporter/*|usr/bin/node_exporter|opt/telemt/install.sh|opt/telemt/update.sh|opt/telemt/uninstall.sh|opt/telemt/doctor.sh|opt/telemt/backup.sh|opt/telemt/VERSION|opt/telemt/INSTALLATION-SUMMARY.txt|opt/telemt/README.md|opt/telemt/LICENSE|opt/telemt/CHANGELOG.md|opt/telemt/stub|opt/telemt/stub/*|etc/systemd/system/telemt-firewall.service|etc/systemd/system/telemt-geoblock.service|etc/systemd/system/telemt-geoblock.timer|etc/systemd/system/telemt-geoblock-resume.service|etc/systemd/system/telemt-geoblock-resume.timer|etc/systemd/system/telemt-stub-cert.service|etc/systemd/system/telemt-stub-cert.timer|etc/systemd/system/telemt-node-exporter.service|etc/systemd/system/node_exporter.service) found=true ;;
             *) return 1 ;;
         esac
     done < <(tar -tzf "$archive")
@@ -1384,10 +1415,10 @@ HELP
 case "${1:-}" in
   help|-h|--help|"") show_help ;;
   version) echo "Telemt Installer v$INSTALLER_VERSION" ;;
-  start) "${COMPOSE[@]}" up -d; if [[ "$NODE_EXPORTER_ENABLE" == true ]]; then systemctl start telemt-node-exporter.service; fi ;;
-  stop) "${COMPOSE[@]}" stop; if [[ "$NODE_EXPORTER_ENABLE" == true ]]; then systemctl stop telemt-node-exporter.service; fi ;;
-  restart) "${COMPOSE[@]}" up -d --force-recreate; if [[ "$NODE_EXPORTER_ENABLE" == true ]]; then systemctl restart telemt-node-exporter.service; fi; wait_healthy ;;
-  status) "${COMPOSE[@]}" ps; if [[ "$NODE_EXPORTER_ENABLE" == true ]]; then systemctl status telemt-node-exporter.service --no-pager -l; fi ;;
+  start) "${COMPOSE[@]}" up -d; if [[ "$NODE_EXPORTER_ENABLE" == true ]]; then systemctl start node_exporter.service; fi ;;
+  stop) "${COMPOSE[@]}" stop; if [[ "$NODE_EXPORTER_ENABLE" == true ]]; then systemctl stop node_exporter.service; fi ;;
+  restart) "${COMPOSE[@]}" up -d --force-recreate; if [[ "$NODE_EXPORTER_ENABLE" == true ]]; then systemctl restart node_exporter.service; fi; wait_healthy ;;
+  status) "${COMPOSE[@]}" ps; if [[ "$NODE_EXPORTER_ENABLE" == true ]]; then systemctl status node_exporter.service --no-pager -l; fi ;;
   logs) "${COMPOSE[@]}" logs --tail "${2:-100}" telemt ;;
   link|links) telegram_links ;;
   links-raw) raw_links ;;
@@ -1580,11 +1611,11 @@ case "${1:-}" in
     if [[ "$secure_enabled" == true ]]; then [[ $(grep -c '^\[DD\]' <<< "$generated_links") -eq 2 ]] && echo "OK: API generated tg:// and https:// DD links" || { echo "FAIL: expected two DD links"; failures=$((failures+1)); }; fi
     if [[ "$tls_enabled" == true ]]; then [[ $(grep -c '^\[EE\]' <<< "$generated_links") -eq 2 ]] && echo "OK: API generated tg:// and https:// EE links" || { echo "FAIL: expected two EE links"; failures=$((failures+1)); }; fi
     ss -H -ltn "sport = :$PORT" | grep -q . && echo "OK: TCP/$PORT listening" || { echo "FAIL: port $PORT"; failures=$((failures+1)); }
-    if [[ "$METRICS_ENABLE" == true ]]; then curl -fsS "http://127.0.0.1:$METRICS_PORT/metrics" >/dev/null && echo "OK: Prometheus metrics" || { echo "FAIL: metrics"; failures=$((failures+1)); }; fi
-    if [[ "$GEO_ENABLE" == true ]]; then curl -fsS "http://127.0.0.1:$GEO_METRICS_PORT/metrics" >/dev/null && echo "OK: GeoIP metrics" || { echo "FAIL: GeoIP exporter"; failures=$((failures+1)); }; fi
+    if [[ "$METRICS_ENABLE" == true ]]; then curl --noproxy '*' -fsS --connect-timeout 2 --max-time 5 "http://127.0.0.1:$METRICS_PORT/metrics" >/dev/null && echo "OK: Prometheus metrics" || { echo "FAIL: metrics"; failures=$((failures+1)); }; fi
+    if [[ "$GEO_ENABLE" == true ]]; then curl --noproxy '*' -fsS --connect-timeout 2 --max-time 5 "http://127.0.0.1:$GEO_METRICS_PORT/metrics" >/dev/null && echo "OK: GeoIP metrics" || { echo "FAIL: GeoIP exporter"; failures=$((failures+1)); }; fi
     if [[ "$NODE_EXPORTER_ENABLE" == true ]]; then
-      systemctl is-active --quiet telemt-node-exporter.service && echo "OK: node_exporter service active" || { echo "FAIL: node_exporter service"; failures=$((failures+1)); }
-      curl -fsS "http://127.0.0.1:$NODE_EXPORTER_PORT/metrics" | grep -q '^node_uname_info' && echo "OK: node_exporter metrics" || { echo "FAIL: node_exporter metrics"; failures=$((failures+1)); }
+      systemctl is-active --quiet node_exporter.service && echo "OK: node_exporter service active" || { echo "FAIL: node_exporter service"; failures=$((failures+1)); }
+      curl --noproxy '*' -fsS --connect-timeout 2 --max-time 5 "http://127.0.0.1:$NODE_EXPORTER_PORT/metrics" | awk '/^node_uname_info/{found=1} END{exit(found?0:1)}' && echo "OK: node_exporter metrics" || { echo "FAIL: node_exporter metrics"; failures=$((failures+1)); }
     fi
     if [[ "$STUB_ENABLE" == true ]]; then
       curl -kfsS --resolve "$STUB_DOMAIN:$STUB_PORT:127.0.0.1" "https://$STUB_DOMAIN:$STUB_PORT/" >/dev/null && echo "OK: Nginx stub direct" || { echo "FAIL: Nginx stub"; failures=$((failures+1)); }
@@ -1614,7 +1645,11 @@ case "${1:-}" in
     chmod 600 "$ROOT/.env" "$ROOT/docker-compose.yml"; chmod 700 "$ROOT/bin" "$ROOT/bin/"*
     systemctl daemon-reload; systemctl enable telemt-firewall.service >/dev/null 2>&1 || true
     [[ -n "$GEO_COUNTRIES" ]] && systemctl enable --now telemt-geoblock.timer >/dev/null 2>&1 || true
-    [[ "$NODE_EXPORTER_ENABLE" == true ]] && systemctl enable --now telemt-node-exporter.service >/dev/null 2>&1 || true
+    if [[ "$NODE_EXPORTER_ENABLE" == true ]]; then
+      id node_exporter >/dev/null 2>&1 || useradd -r -M -s /bin/false node_exporter
+      chown node_exporter:node_exporter /usr/bin/node_exporter
+      systemctl enable --now node_exporter.service >/dev/null 2>&1 || true
+    fi
     if [[ "$STUB_ENABLE" == true ]]; then chown "$STUB_OWNER:$(id -gn "$STUB_OWNER")" /opt/telemt/stub/html /opt/telemt/stub/html/index.html; /opt/telemt/bin/stub-cert.sh provision; systemctl enable --now telemt-stub-cert.timer >/dev/null 2>&1 || true; fi
     "${COMPOSE[@]}" up -d --force-recreate; wait_healthy
     ;;
@@ -1642,6 +1677,9 @@ case "${1:-}" in
     [[ "$ROOT" == /opt/telemt ]] || { echo "Небезопасный путь ROOT=$ROOT; удаление остановлено" >&2; exit 1; }
     cert_name=${STUB_DOMAIN:-}
     cert_type=${STUB_CERT_TYPE:-none}
+    node_owned=false; node_user_created=false
+    [[ -e "$ROOT/node-exporter/.installer-owned" ]] && node_owned=true
+    [[ -e "$ROOT/node-exporter/.installer-created-user" ]] && node_user_created=true
     telemt_image=$(awk -F= '$1=="TELEMT_IMAGE"{sub(/^[^=]*=/,""); print; exit}' "$ROOT/.env" 2>/dev/null || true)
     stub_image=$(awk -F= '$1=="STUB_IMAGE"{sub(/^[^=]*=/,""); print; exit}' "$ROOT/.env" 2>/dev/null || true)
 
@@ -1651,7 +1689,13 @@ case "${1:-}" in
     for unit_name in telemt-firewall.service telemt-geoblock.service telemt-geoblock.timer telemt-geoblock-resume.service telemt-geoblock-resume.timer telemt-stub-cert.service telemt-stub-cert.timer telemt-node-exporter.service; do
         systemctl disable --now "$unit_name" >/dev/null 2>&1 || systemctl stop "$unit_name" >/dev/null 2>&1 || true
     done
+    [[ "$node_owned" == true ]] && systemctl disable --now node_exporter.service >/dev/null 2>&1 || true
     for unit in /etc/systemd/system/telemt-firewall.service /etc/systemd/system/telemt-geoblock.service /etc/systemd/system/telemt-geoblock.timer /etc/systemd/system/telemt-geoblock-resume.service /etc/systemd/system/telemt-geoblock-resume.timer /etc/systemd/system/telemt-stub-cert.service /etc/systemd/system/telemt-stub-cert.timer /etc/systemd/system/telemt-node-exporter.service; do [[ -e "$unit" || -L "$unit" ]] && unlink "$unit"; done
+    if [[ "$node_owned" == true ]]; then
+        [[ -e /etc/systemd/system/node_exporter.service || -L /etc/systemd/system/node_exporter.service ]] && unlink /etc/systemd/system/node_exporter.service
+        [[ -e /usr/bin/node_exporter ]] && unlink /usr/bin/node_exporter
+        [[ "$node_user_created" == true ]] && userdel node_exporter >/dev/null 2>&1 || true
+    fi
     [[ -e /run/telemt-geoblock.paused ]] && unlink /run/telemt-geoblock.paused
     if [[ -f /etc/fail2ban/jail.d/telemt-sshd.conf ]]; then unlink /etc/fail2ban/jail.d/telemt-sshd.conf; systemctl restart fail2ban || true; fi
     [[ -L /usr/local/bin/mtproto || -e /usr/local/bin/mtproto ]] && unlink /usr/local/bin/mtproto

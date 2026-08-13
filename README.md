@@ -133,7 +133,7 @@ Docker и Compose v2 устанавливаются автоматически �
 ├── bin/                   # firewall, GeoBlock, cert и mtproto
 ├── stub/html/index.html   # ваша HTML5-страница
 ├── geo-exporter/          # GeoIP exporter и его данные
-├── node-exporter/         # Закреплённый бинарник node_exporter v1.5.0
+├── node-exporter/         # Маркеры владения node_exporter для backup/uninstall
 ├── cache/
 ├── logs/
 └── backups/
@@ -276,6 +276,7 @@ sudo mtproto geoblock resume   # включить раньше пяти мину
 - API Telemt слушает только `127.0.0.1:9091` и работает в `read_only`;
 - внешний доступ к метрикам включается только для точного IPv4 удалённого Grafana/Prometheus; вариант `0.0.0.0/0` установщик не принимает;
 - node_exporter v1.5.0 слушает отдельный порт `9100` по умолчанию и проверяется по `/metrics`;
+- node_exporter запускается непривилегированным системным пользователем `node_exporter`; бинарник находится в `/usr/bin/node_exporter`, unit — `/etc/systemd/system/node_exporter.service`;
 - закрытая памятка и служебные секреты имеют права `600`; `config.toml` — `644 root:root` внутри недоступного другим пользователям каталога `/opt/telemt` (`700`), что совместимо с non-root контейнером и Docker user namespace remapping;
 - контейнеры запускаются с read-only root filesystem;
 - capabilities сброшены, включён `no-new-privileges`;
