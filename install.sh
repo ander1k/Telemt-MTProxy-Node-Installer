@@ -737,6 +737,7 @@ services:
   telemt:
     image: ${TELEMT_IMAGE}
     container_name: telemt
+__TELEMT_PRIVILEGED_PORT_USER__
     restart: unless-stopped
     network_mode: host
     working_dir: /run/telemt
@@ -768,6 +769,11 @@ services:
         max-size: "50m"
         max-file: "5"
 COMPOSE
+if (( PORT < 1024 )); then
+    sed -i 's|^__TELEMT_PRIVILEGED_PORT_USER__$|    # UID 0 нужен только для bind(2) привилегированного порта; capabilities ограничены ниже.\n    user: "0:0"|' "$INSTALL_ROOT/docker-compose.yml"
+else
+    sed -i '/^__TELEMT_PRIVILEGED_PORT_USER__$/d' "$INSTALL_ROOT/docker-compose.yml"
+fi
 chmod 600 "$INSTALL_ROOT/docker-compose.yml"
 
 cat > "$CONFIG_DIR/installer.env" <<EOF
@@ -1266,7 +1272,9 @@ database(); reader=geoip2.database.Reader(DB); threading.Thread(target=poll,daem
 PY
     cat > "$INSTALL_ROOT/geo-exporter/Dockerfile" <<'DOCKERFILE'
 FROM python:3.12-slim
-RUN pip install --no-cache-dir geoip2
+ENV PIP_ROOT_USER_ACTION=ignore \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+RUN pip install --no-cache-dir "geoip2==5.3.0"
 WORKDIR /app
 COPY exporter.py /app/exporter.py
 USER 65534:65534
