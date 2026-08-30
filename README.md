@@ -1,438 +1,505 @@
 <div align="center">
 
-# ⚡ Telemt Installer
+# ⚡ Telemt Toolkit
 
-### Защищённый MTProto-прокси с красивым интерактивным мастером
+### Telemt-прокси и MTProto FIX V3 — из одного понятного мастера
 
 [![Release](https://img.shields.io/badge/release-v1.0-22c55e?style=for-the-badge)](../../releases)
-[![Linux](https://img.shields.io/badge/Linux-Debian%20%7C%20Ubuntu%20%7C%20RHEL-0ea5e9?style=for-the-badge&logo=linux&logoColor=white)](#системные-требования)
+[![Linux](https://img.shields.io/badge/Linux-Debian%20%7C%20Ubuntu%20%7C%20RHEL-0ea5e9?style=for-the-badge&logo=linux&logoColor=white)](#требования)
 [![Docker](https://img.shields.io/badge/Docker-hardened-2563eb?style=for-the-badge&logo=docker&logoColor=white)](#безопасность)
 [![License](https://img.shields.io/badge/installer-MIT-f59e0b?style=for-the-badge)](LICENSE)
 
-**Установите Telemt, MTProto FIX V3, firewall, Fail2ban, GeoIP, node_exporter и настоящую HTTPS-заглушку в одном понятном мастере.**
+**Разверните полный MTProto-стек или установите только FIX для уже работающего прокси.  
+Мастер сначала показывает план и меняет сервер только после подтверждения.**
 
-[Установка](#быстрый-старт) · [Возможности](#возможности) · [Команды](#управление) · [Заглушка](#https-заглушка) · [Обновление](#обновление-и-откат)
+[Быстрый старт](#быстрый-старт) · [Два режима](#два-режима-установки) · [Управление](#управление) · [Диагностика](#если-что-то-не-работает)
 
 </div>
 
 ---
 
-## Зачем нужен этот установщик
+## Что умеет Toolkit
 
-Ручная настройка MTProto-прокси затрагивает Docker, TLS, firewall, сертификаты, мониторинг и системные службы. `Telemt Installer` собирает всё это в один цветной мастер и объясняет каждый выбор простым языком.
+| Компонент | Что получает администратор |
+|---|---|
+| Telemt | EE/TLS, DD/secure или оба режима, собственный Secret и ad-tag |
+| MTProto FIX V3 | Опциональные iptables/u32-правила для одного или нескольких портов |
+| Firewall и GeoBlock | Открытие нужных портов, IPv4/IPv6-фильтрация, сохранение SSH-доступа |
+| HTTPS-заглушка | Nginx, три HTML-шаблона, Let's Encrypt и self-signed fallback |
+| Мониторинг | Метрики Telemt, GeoIP exporter и node_exporter |
+| Обслуживание | Doctor, логи, backup/restore, обновление с откатом и полное удаление |
+| Плановый restart | 30 минут по умолчанию либо 1/3/6/12/24 часа; можно отключить |
 
-После установки проект целиком находится в:
+После полной установки всё управляется одной командой:
 
-```text
-/opt/telemt
+```bash
+sudo mtproto help
 ```
 
-Запуск установщика из `/root`, `/tmp`, домашнего каталога или другой папки не меняет место установки.
-Повторный запуск `/opt/telemt/install.sh` поддерживается: мастер создаст backup и не будет пытаться копировать файл поверх самого себя.
+## Два режима установки
+
+При первом запуске появляется простой выбор:
+
+```text
+Что установить?
+
+1) Полная система Telemt
+   Прокси, firewall, MTProto FIX, мониторинг и команды управления
+
+2) Только MTProto FIX V3
+   Для уже установленного MTProto-прокси
+
+0) Выход
+   Сервер не изменяется
+```
+
+### Какой режим выбрать
+
+| Ситуация | Выбор |
+|---|---|
+| На чистом VPS нужен готовый прокси | **1 — Полная система Telemt** |
+| Telemt или другой MTProto-прокси уже работает | **2 — Только MTProto FIX V3** |
+| Нужны ссылка, Secret, GeoBlock, мониторинг и backup | **1 — Полная система** |
+| Нужно применить FIX к существующему порту без изменения прокси | **2 — Только FIX** |
 
 > [!IMPORTANT]
-> Это самостоятельный установщик и набор средств управления. Сам сервер Telemt является отдельным upstream-проектом и загружается как готовый контейнерный образ.
+> Режим «только FIX» не устанавливает и не изменяет Telemt, Docker, Nginx, GeoBlock, Fail2ban, мониторинг, Proxy Secret, ad-tag или Telegram-ссылку.
 
 ## Быстрый старт
 
-### Вариант 1 — скачать релиз
+### 1. Распакуйте релиз
 
-Скачайте `telemt-installer-v1.0.tar.gz` со страницы [Releases](../../releases), затем выполните:
+ZIP:
 
 ```bash
-tar -xzf /tmp/telemt-installer.tar.gz -C /tmp
-sudo bash /tmp/telemt-installer-v1.0/install.sh
+unzip telemt-installer-v1.0.zip
+cd telemt-installer-v1.0
 ```
 
-### Вариант 2 — клонировать репозиторий
+или TAR.GZ:
 
 ```bash
-git clone <адрес-этого-репозитория> telemt
-cd telemt
+tar -xzf telemt-installer-v1.0.tar.gz
+cd telemt-installer-v1.0
+```
+
+### 2. Запустите мастер
+
+```bash
 sudo bash install.sh
 ```
 
-Если Ubuntu/Debian в этот момент выполняет `unattended-upgrades`, мастер не удаляет lock-файлы и не останавливает обновление. Он показывает PID фактического владельца APT/dpkg lock и безопасно ждёт до 15 минут. Постоянный служебный процесс `unattended-upgrade-shutdown --wait-for-sig`, не удерживающий lock, установку не задерживает. Лимит можно изменить только для конкретного запуска: `sudo APT_LOCK_WAIT_SECONDS=1800 bash install.sh`.
+### 3. Выберите режим
 
-При первом запуске мастер спрашивает, что установить:
+Для нового сервера выберите **1**. Для существующего прокси, которому нужен только V3 FIX, выберите **2**.
 
-```text
-1) Полная система Telemt — прокси, firewall, FIX, мониторинг и управление
-2) Только MTProto FIX V3 — для уже установленного MTProto-прокси
-0) Выход — сервер не изменяется
-```
-
-Полный режим сначала собирает ответы, затем показывает единый план. Сервер изменяется только после подтверждения. Режим «только FIX» не спрашивает домен, Proxy Secret, ad-tag, Docker, GeoBlock или мониторинг: он показывает слушающие TCP-порты и запрашивает только порт существующего прокси.
-
-## Возможности
-
-| Модуль | Что делает |
-|---|---|
-| 🎨 Понятный мастер | Первый выбор сценария и этапы «Настройка → Установка → Проверка → Готово» |
-| 🔐 Telemt | EE/TLS по умолчанию, DD/secure или оба режима, собственный secret и ad-tag |
-| 🧱 Firewall | Открывает порт прокси, поддерживает IPv4/IPv6 и не блокирует SSH |
-| ⚡ MTProto FIX V3 | Опциональные iptables/u32-правила By MEKO; порт или несколько портов задаются в мастере |
-| 🌍 GeoBlock | Блокирует крупные регионы, атомарно обновляет IP-наборы раз в сутки |
-| 🛡️ Fail2ban | Защищает фактические SSH-порты от перебора паролей |
-| 📊 Мониторинг | Telemt/GeoIP-метрики и node_exporter v1.5.0 с allow-list для удалённой Grafana |
-| 🌐 HTTPS-заглушка | Внутренний Nginx, три premium HTML5-шаблона, SFTP-редактирование |
-| 🔏 Сертификаты | Let's Encrypt с автопродлением и self-signed fallback |
-| 🩺 Диагностика | Проверяет контейнеры, API, порты, firewall, DNS, метрики и сертификат |
-| 🔄 Плановый restart | Systemd timer: 30 минут по умолчанию либо 1/3/6/12/24 часа; можно отключить |
-| ♻️ Обновления | Фиксирует image digest, проверяет healthcheck и откатывается при ошибке |
-| 💾 Backups | Сохраняет конфигурацию, сайт, скрипты и systemd units |
-
-Образ GeoIP Exporter собирается с зафиксированной версией `geoip2==5.3.0`. Установка Python-зависимостей выполняется только внутри изолированного Docker build и не изменяет системные Python-пакеты сервера.
-
-При выборе привилегированного порта `1–1023` (например, рекомендуемого TCP/443) Telemt запускается в контейнере с UID 0 только для возможности занять порт. При этом контейнер остаётся с read-only filesystem, `no-new-privileges`, удалёнными capabilities и единственным разрешением `NET_BIND_SERVICE`. На портах `1024–65535` сохраняется непривилегированный пользователь официального образа.
-
-## Как выглядит мастер
+Интерфейс разделён на четыре понятных этапа:
 
 ```text
-╔════════════════════════════════════════════════════╗
-║ ● TELEMT TOOLKIT                                   ║
-║   Telemt stack и MTProto FIX · v1.0                ║
-╚════════════════════════════════════════════════════╝
-
-  1) Полная система Telemt
-  2) Только MTProto FIX V3
-  0) Выход
-
-━━━━━━━━━━━━━━━━  УСТАНОВКА СИСТЕМЫ  ━━━━━━━━━━━━━━━━
-  Пакеты, конфигурация и службы. Повторный запуск безопасен.
-
-╭─ УСТАНОВКА СИСТЕМЫ · ШАГ 03 ─────────────────────╮
-│ Firewall и GeoBlock                               │
-╰───────────────────────────────────────────────────╯
+НАСТРОЙКА → УСТАНОВКА → ПРОВЕРКА → ГОТОВО
 ```
 
-Мастер сначала показывает IP, домен и свободный порт. Затем генерирует `Proxy Secret` и выводит данные в том порядке, в котором их нужно передать `@MTProxybot`:
+Пример:
 
 ```text
-╭─ РЕЗУЛЬТАТ: данные для @MTProxybot
-│ 1. Команда боту     /newproxy
-│ 2. IP и порт        203.0.113.10:8443
-│ 3. Proxy Secret     0123456789abcdef0123456789abcdef
-╰────────────────────────────────────────────────
+━━━━━━━━━━━━━━━━  НАСТРОЙКА FIX  ━━━━━━━━━━━━━━━━
+  Только V3 iptables: Telemt, Docker и Proxy Secret не изменяются.
+
+╭─ НАСТРОЙКА FIX · ШАГ 01 ─────────────────────────
+│ Порт MTProto-прокси
+╰──────────────────────────────────────────────────
 ```
 
-`Proxy Secret` и `ad_tag` — разные значения. После регистрации бот выдаёт `ad_tag`, который можно сразу вставить в мастер. Ссылку, которую показывает бот на этапе регистрации, использовать не нужно. По завершении установки мастер получает из API Telemt готовую ссылку `tg://proxy?...` или `https://t.me/proxy?...` для добавления прокси в Telegram.
+## Полная установка Telemt
 
-## Системные требования
+Мастер последовательно запросит:
 
-- Debian, Ubuntu, RHEL, Fedora или CentOS;
-- systemd;
-- root или `sudo`;
-- минимум 1 ГБ свободного места;
-- DNS A-запись — для собственного домена и Let's Encrypt;
-- открытый TCP-порт прокси во внешнем firewall провайдера.
+1. публичный домен или IP;
+2. TCP-порт Telemt;
+3. версию Telemt;
+4. Proxy Secret — можно безопасно сгенерировать;
+5. ad-tag от `@MTProxybot` — можно добавить позже;
+6. режим DD, EE/TLS или оба;
+7. HTTPS-заглушку;
+8. мониторинг и адрес Grafana/Prometheus;
+9. GeoBlock и режим IPv6;
+10. Fail2ban;
+11. интервал планового перезапуска;
+12. MTProto FIX V3 и его порты.
 
-Docker и Compose v2 устанавливаются автоматически из системного или официального Docker-репозитория.
+После этого показывается единый план. До ответа **Y** сервер не изменяется.
 
-## Структура `/opt/telemt`
+### Регистрация в @MTProxybot
+
+Мастер показывает данные в нужном порядке:
 
 ```text
-/opt/telemt/
-├── install.sh             # сохранённый мастер установки
-├── update.sh              # обновление Telemt
-├── uninstall.sh           # безопасное удаление
-├── doctor.sh              # полная диагностика
-├── backup.sh              # создание backup
-├── VERSION                # версия установщика
-├── INSTALLATION-SUMMARY.txt # закрытая памятка с данными подключения
-├── docker-compose.yml     # hardened-контейнеры
-├── config/
-│   ├── config.toml        # конфигурация Telemt и секрет
-│   ├── installer.env      # параметры модулей
-│   └── stub/              # Nginx и сертификаты заглушки
-├── bin/                   # firewall, GeoBlock, cert и mtproto
-├── licenses/              # лицензии интегрированных сторонних компонентов
-├── stub/html/index.html   # ваша HTML5-страница
-├── geo-exporter/          # GeoIP exporter и его данные
-├── node-exporter/         # Маркеры владения node_exporter для backup/uninstall
-├── cache/
-├── logs/
-└── backups/
+1. Команда:       /newproxy
+2. Сервер:        203.0.113.10:8443
+3. Proxy Secret:  0123456789abcdef0123456789abcdef
 ```
 
-Системная интеграция создаёт только unit-файлы в `/etc/systemd/system`, jail Fail2ban и ссылку `/usr/local/bin/mtproto`.
+Secret и ad-tag — разные значения. После установки рабочие DD/EE-ссылки формирует API Telemt:
+
+```bash
+sudo mtproto links
+```
+
+Если используется Proxy Sponsor:
+
+1. откройте `@MTProxybot`;
+2. отправьте `/myproxies`;
+3. выберите сервер;
+4. нажмите **Set promotion**;
+5. укажите публичный канал;
+6. подождите до одного часа.
+
+Проверка локальной конфигурации:
+
+```bash
+sudo mtproto sponsor
+```
+
+## Только MTProto FIX V3
+
+Этот режим предназначен для уже работающего MTProto-прокси.
+
+Мастер:
+
+- показывает TCP-порты, которые слушает сервер;
+- спрашивает порт прокси или список через запятую;
+- проверяет диапазон и удаляет дубликаты;
+- проверяет поддержку `xt_u32` и `hashlimit`;
+- создаёт отдельные идемпотентные iptables-цепочки;
+- включает восстановление правил после перезагрузки.
+
+Пример ввода:
+
+```text
+Порт или порты FIX [443]: 443,8443
+```
+
+Устанавливаются только:
+
+- `iptables`, `kmod` и необходимые служебные пакеты;
+- `/opt/telemt/bin/mtproto-fix.sh`;
+- `telemt-mtproto-fix.service`;
+- команда `/usr/local/bin/mtproto-fix`;
+- минимальный закрытый файл состояния;
+- оригинальная лицензия MEKO.
+
+Управление автономной установкой:
+
+```bash
+sudo mtproto-fix
+sudo mtproto-fix status
+sudo mtproto-fix install 443,8443
+sudo mtproto-fix apply
+sudo mtproto-fix remove
+```
+
+Если уже подключён внешний `MTPR_SYNFIX`, мастер останавливается до внесения изменений. Сначала удалите прежний FIX через исходный `mekopr`, чтобы два набора правил не фильтровали один трафик одновременно.
+
+### Что делает V3
+
+V3 использует сигнатуру `u32` для входящих SYN-пакетов:
+
+- совпавшая iOS-сигнатура проходит без дополнительного лимита FIX;
+- остальные клиенты получают лимит 54 SYN/минуту с одного IP;
+- превышение получает немедленный TCP reset;
+- разрешённые пакеты продолжают проходить через основной firewall и GeoBlock.
+
+FIX предназначен для характерных зависаний начального TCP-подключения и двухминутной блокировки клиента. Он не может восстановить уже заблокированный IP или порт и не меняет Telegram-ссылку.
+
+Интеграция основана на [MTPROTO_FIX_By_MEKO](https://github.com/Mekotofeuka/MTPROTO_FIX_By_MEKO). Авторство и полный текст лицензии сохранены в [THIRD_PARTY_LICENSES/MTPROTO_FIX_By_MEKO-LICENSE.txt](THIRD_PARTY_LICENSES/MTPROTO_FIX_By_MEKO-LICENSE.txt).
 
 ## Управление
 
-Основная команда доступна из любой папки:
+### Подключение и состояние
 
 ```bash
-mtproto status
-mtproto links
-mtproto links-raw
-mtproto credentials
-mtproto restart-schedule
-mtproto fix
-mtproto fix status
-mtproto fix install 443,8443
-mtproto fix remove
-mtproto secrets
-mtproto sponsor
-mtproto client-debug 120
-mtproto geoblock status
-mtproto geoblock pause
-mtproto geoblock resume
-mtproto ports
-mtproto logs 200
-mtproto doctor
-mtproto firewall
-mtproto users
-mtproto stats
-mtproto backup
-mtproto update 3.4.25
-mtproto help
-mtproto uninstall
+sudo mtproto credentials       # все ключи, ссылки и адреса
+sudo mtproto links             # готовые tg:// и https://t.me ссылки
+sudo mtproto status            # контейнеры и systemd-модули
+sudo mtproto doctor            # полная диагностика
+sudo mtproto ports             # порты, сокеты и firewall
+sudo mtproto logs 200          # последние 200 строк Telemt
+sudo mtproto client-debug 120  # живой журнал подключения клиента
 ```
 
-Те же операции доступны отдельными файлами:
-
-```bash
-sudo /opt/telemt/doctor.sh
-sudo /opt/telemt/backup.sh
-sudo /opt/telemt/update.sh 3.4.25
-sudo /opt/telemt/uninstall.sh
-```
-
-Команда `mtproto links` показывает для каждого активного режима две эквивалентные ссылки: `tg://proxy?...` и `https://t.me/proxy?...`. При DD + EE итог содержит четыре ссылки. `mtproto links-raw` выводит исходные ссылки API Telemt.
-
-Команды `mtproto credentials` и `mtproto secrets` повторно показывают полный итог установки: сервер, все порты, Proxy Secret, ad-tag, DD/EE-ссылки, адрес сайта-заглушки, API и endpoints Telemt, GeoIP и node_exporter. Эти данные также сохраняются в `/opt/telemt/INSTALLATION-SUMMARY.txt` с правами `600`; читать файл должен только `root`.
-
-По умолчанию systemd timer перезапускает только контейнер Telemt каждые 30 минут и ждёт успешный healthcheck. В мастере можно выбрать 1, 3, 6, 12 или 24 часа либо полностью отключить функцию. Остановленный администратором контейнер timer не запускает. Текущий интервал и следующее срабатывание показывает `mtproto restart-schedule`.
-
-Команда `mtproto sponsor` проверяет `use_middle_proxy`, формат и согласованность глобального и пользовательского ad-tag, доступность API и недавние ошибки Middle Proxy. Она не может подтвердить регистрацию тега на стороне Telegram — это доступно только через `@MTProxybot`.
-
-Команда `mtproto client-debug 120` в течение двух минут показывает новые логи Telemt. В это время удалите старую запись прокси на iPhone, снова откройте нужную DD- или EE-ссылку и попробуйте подключиться. Если новых строк нет, соединение не дошло до Telemt; `Telegram handshake timeout` обычно указывает на клиент, сеть или DPI; ошибки `ME` относятся к соединению Telemt с Telegram.
-
-Команда `mtproto ports` показывает назначение всех портов, активные listening sockets и правила firewall, созданные установщиком.
-
-## MTProto FIX V3 iptables
-
-В мастер встроен опциональный V3-алгоритм из проекта [MTPROTO_FIX_By_MEKO](https://github.com/Mekotofeuka/MTPROTO_FIX_By_MEKO). При установке мастер отдельно спрашивает один TCP-порт или список через запятую; по умолчанию подставляется текущий порт Telemt. Например:
-
-```text
-MTProto FIX [1]: 1
-Порт или порты FIX через запятую [8443]: 443,8443
-```
-
-V3 распознаёт SYN-сигнатуру iOS через `xt_u32`, пропускает её без дополнительного лимита, а для остальных клиентов допускает до 54 SYN/минуту с одного исходного IP. Превышение получает немедленный TCP reset. Разрешённые пакеты затем проходят через основной firewall и GeoBlock установщика, поэтому FIX не отменяет региональную защиту.
-
-Интерактивное управление после установки:
+### MTProto FIX
 
 ```bash
 sudo mtproto fix
-```
-
-Меню позволяет показать статус и счётчики, установить или повторно применить V3 к другому списку портов и удалить только FIX. Прямые команды:
-
-```bash
 sudo mtproto fix status
 sudo mtproto fix install 443,8443
 sudo mtproto fix apply
 sudo mtproto fix remove
 ```
 
-Правила идемпотентны и восстанавливаются отдельным `telemt-mtproto-fix.service` после перезагрузки. `doctor`, backup, restore и полный uninstall учитывают этот модуль. Требуется поддержка ядром модулей `xt_u32` и `hashlimit`; установщик проверяет их перед применением.
-
-FIX предназначен для характерных зависаний начального TCP-подключения и двухминутной блокировки клиента. Он не меняет Proxy Secret, ссылку или конфигурацию Telegram и не может восстановить уже заблокированный IP/порт. Авторские права и лицензия MEKO сохранены в `THIRD_PARTY_LICENSES/MTPROTO_FIX_By_MEKO-LICENSE.txt`.
-
-### Установка только FIX
-
-Этот режим предназначен для сервера, где MTProto-прокси уже установлен другим способом:
-
-1. запустите `sudo bash install.sh`;
-2. выберите `2) Только MTProto FIX V3`;
-3. укажите порт существующего прокси, например `8443`, либо список `443,8443`;
-4. проверьте краткий план и подтвердите установку.
-
-Устанавливаются только `iptables`/`kmod`, V3-скрипт, `telemt-mtproto-fix.service`, лицензия MEKO и команда `mtproto-fix`. Telemt, Docker, Nginx, GeoBlock, Fail2ban, мониторинг, Proxy Secret, ad-tag и Telegram-ссылка не устанавливаются и не изменяются.
+### GeoBlock
 
 ```bash
-sudo mtproto-fix
-sudo mtproto-fix status
-sudo mtproto-fix install 443,8443
-sudo mtproto-fix remove
+sudo mtproto geoblock status
+sudo mtproto geoblock pause    # отключить только региональные DROP на 5 минут
+sudo mtproto geoblock resume   # включить немедленно
 ```
 
-Если обнаружен активный внешний `MTPR_SYNFIX`, мастер останавливается до его удаления через исходный `mekopr`, чтобы два набора правил не фильтровали один трафик одновременно.
+Пауза GeoBlock не отключает Fail2ban, SSH-исключения или остальные правила firewall. Возврат выполняется отдельным systemd timer даже при разрыве SSH.
 
-### GeoBlock без длительного D-Bus-ожидания
+### Сервис и обслуживание
 
-В полной установке первичное обновление GeoBlock запускается неблокирующим systemd-вызовом. Мастер ожидает быстрый результат не более минуты; более долгая загрузка продолжает выполняться в фоне. Поэтому кратковременный перезапуск D-Bus/systemd после установки пакетов больше не удерживает весь шаг одним длинным `systemctl start`.
-
-Команда `mtproto help` выводит сгруппированный список команд с краткими пояснениями.
-
-## Proxy Sponsor и ad-tag
-
-Ad-tag активирует серверную часть статистики и продвижения, но сам по себе не назначает канал. После установки:
-
-1. откройте `@MTProxybot` и отправьте `/myproxies`;
-2. выберите зарегистрированный IP и порт;
-3. нажмите `Set promotion`;
-4. отправьте ссылку на публичный канал — приватный канал не подходит;
-5. подождите до одного часа;
-6. проверяйте с аккаунта, который ещё не подписан на этот канал.
-
-На iOS перед повторной проверкой обновите официальный Telegram, удалите старую запись прокси целиком и добавьте её заново из свежей ссылки `mtproto links`. Наличие ping подтверждает только доступность IP по ICMP и ничего не говорит об MTProto-handshake. Если EE работает на том же адресе и порту, а DD нет, DNS, входной порт и базовый secret уже подтверждены; сравните Wi-Fi и мобильную сеть и одновременно запустите `sudo mtproto client-debug 120`.
+```bash
+sudo mtproto start
+sudo mtproto stop
+sudo mtproto restart
+sudo mtproto restart-schedule
+sudo mtproto backup
+sudo mtproto update 3.4.25
+sudo mtproto help
+```
 
 ## HTTPS-заглушка
 
-Telemt принимает Telegram на публичном порту, а обычные HTTPS-запросы пересылает во внутренний Nginx:
+Обычный браузер видит сайт, а Telegram с правильным Secret — MTProto-прокси.
 
-```toml
-[censorship]
-tls_domain = "telemt.example.com"
-mask = true
-mask_host = "127.0.0.1"
-mask_port = 9443
-```
+Доступны три шаблона:
 
-Nginx всегда слушает внутренний loopback-порт для маскировки Telemt и показывает одну из трёх страниц:
+1. Private Cloud;
+2. Maison Studio;
+3. Aurora Launch.
 
-1. статус технологического сервиса;
-2. персональное портфолио;
-3. «Скоро открытие».
-
-Если Telemt работает не на `443`, мастер может дополнительно открыть Nginx на стандартном HTTPS-порту `443`. Тогда одновременно работают:
-
-- `https://example.com/` — обычный сайт без порта;
-- `https://example.com:8443/` — та же заглушка через маскирующий порт Telemt;
-- Telegram-прокси — на выбранном порту Telemt.
-
-Если Telemt сразу установлен на `443`, отдельный публичный listener Nginx не создаётся: Telemt сам отличает Telegram от браузера и направляет браузер в Nginx. Произвольный порт, явно введённый в адресной строке, должен быть отдельно открыт и прослушиваться; установщик намеренно не перенаправляет все порты сервера.
-
-Заменить страницу по SFTP можно здесь:
+HTML-файл:
 
 ```text
 /opt/telemt/stub/html/index.html
 ```
 
-Команды управления:
+Управление:
 
 ```bash
-mtproto stub status
-mtproto stub check
-mtproto stub path
-mtproto stub backup
-mtproto stub renew
-mtproto stub letsencrypt
-mtproto stub selfsigned
-mtproto stub remove
+sudo mtproto stub status
+sudo mtproto stub check
+sudo mtproto stub path
+sudo mtproto stub backup
+sudo mtproto stub renew
+sudo mtproto stub letsencrypt
+sudo mtproto stub selfsigned
+sudo mtproto stub remove
 ```
 
-Если DNS указывает на сервер и TCP/80 доступен, Certbot выпускает Let's Encrypt. Иначе создаётся временный self-signed сертификат, а ежедневный timer продолжает проверять возможность перехода на Let's Encrypt.
+Если DNS указывает на сервер и TCP/80 доступен, Certbot выпускает Let's Encrypt. Иначе используется self-signed сертификат, а ежедневная проверка позволяет перейти на Let's Encrypt позднее.
+
+## Мониторинг
+
+Можно включить:
+
+- метрики Telemt — порт `9090`;
+- GeoIP exporter — порт `9095`;
+- node_exporter — порт `9100`.
+
+Удалённый доступ разрешается только с одного точного IPv4 Grafana/Prometheus. Значение `0.0.0.0/0` мастер не принимает.
+
+node_exporter:
+
+- версия `1.5.0`;
+- проверка официальной SHA-256;
+- отдельный непривилегированный пользователь;
+- unit `node_exporter.service`;
+- бинарник `/usr/bin/node_exporter`.
+
+## Порты и внешний firewall
+
+Установщик управляет firewall внутри Linux, но не может изменить Security Group или firewall панели VPS-провайдера.
+
+| Порт | Назначение | Внешний доступ |
+|---|---|---|
+| Выбранный порт Telemt | Telegram-прокси | Открыть постоянно |
+| `443/tcp` | Сайт без номера порта | Если включён отдельный публичный HTTPS |
+| `80/tcp` | Let's Encrypt | Открыть на время выпуска/продления |
+| `9091/tcp` | API Telemt | Только localhost |
+| Внутренний порт Nginx | Маскировка Telemt | Только localhost |
+| `9090/tcp` | Telemt Prometheus | Localhost или IP мониторинга |
+| `9095/tcp` | GeoIP exporter | Localhost или IP мониторинга |
+| `9100/tcp` | node_exporter | Localhost или IP мониторинга |
+
+Для исходящих соединений требуются DNS и TCP/443 для Docker registry, ACME, IPdeny и работы Telemt.
 
 ## GeoBlock и SSH
 
-Доступны Северная Америка, Латинская Америка, Европа, Азия, Ближний Восток, Африка и Океания. Наборы IPv4/IPv6 сначала полностью загружаются во временный `ipset`, проверяются и только затем атомарно заменяют рабочий набор.
+GeoBlock сначала загружает новый список во временный `ipset`, проверяет его и только затем атомарно заменяет активный набор. При сетевой ошибке рабочий набор сохраняется.
 
-Территории, для которых IPdeny не публикует отдельный файл адресов, безопасно пропускаются. При временной сетевой ошибке действующий набор не заменяется, установка продолжается, а systemd timer повторяет загрузку позднее.
+Первое обновление запускается неблокирующим systemd-вызовом. Мастер ожидает быстрый результат до минуты; если загрузка продолжается дольше, установка переходит к следующему шагу, а GeoBlock завершает работу в фоне.
 
-Из региональной блокировки всегда исключены:
+Из блокировки всегда исключаются:
 
 - TCP/22;
 - фактические порты `sshd`;
-- IP текущей SSH-сессии администратора.
-
-Для временной диагностики можно отключить только региональные `DROP`-правила ровно на пять минут:
-
-```bash
-sudo mtproto geoblock pause
-sudo mtproto geoblock status
-sudo mtproto geoblock resume   # включить раньше пяти минут
-```
-
-Возврат создаётся как отдельный systemd timer, поэтому GeoBlock включится автоматически даже при разрыве SSH. Команда не отключает Fail2ban, SSH-исключения, разрешения портов или остальные правила firewall.
+- IP текущей SSH-сессии администратора;
+- loopback и локальные healthcheck.
 
 ## Безопасность
 
-- API Telemt слушает только `127.0.0.1:9091` и работает в `read_only`;
-- внешний доступ к метрикам включается только для точного IPv4 удалённого Grafana/Prometheus; вариант `0.0.0.0/0` установщик не принимает;
-- node_exporter v1.5.0 слушает отдельный порт `9100` по умолчанию и проверяется по `/metrics`;
-- node_exporter запускается непривилегированным системным пользователем `node_exporter`; бинарник находится в `/usr/bin/node_exporter`, unit — `/etc/systemd/system/node_exporter.service`;
-- закрытая памятка и служебные секреты имеют права `600`; `config.toml` — `644 root:root` внутри недоступного другим пользователям каталога `/opt/telemt` (`700`), что совместимо с non-root контейнером и Docker user namespace remapping;
-- контейнеры запускаются с read-only root filesystem;
-- capabilities сброшены, включён `no-new-privileges`;
-- Docker-образы фиксируются по content digest;
-- логи контейнеров ограничены по размеру;
-- архив восстановления проверяется на безопасные пути;
-- обновление автоматически откатывается при неуспешном healthcheck.
+- API Telemt — только `127.0.0.1:9091`, режим read-only;
+- секреты и итоговая памятка — права `600`;
+- каталог `/opt/telemt` — права `700`;
+- контейнеры — read-only filesystem и `no-new-privileges`;
+- capabilities сброшены;
+- образы фиксируются по content digest;
+- логи ограничены по размеру;
+- метрики снаружи доступны только точному IP мониторинга;
+- архив restore проверяется на абсолютные пути и `..`;
+- update автоматически откатывается при неуспешном healthcheck;
+- SSH исключается из региональной блокировки.
 
-## Обновление и откат
+При порте ниже 1024 контейнер Telemt запускается с UID 0 только для `bind(2)`, сохраняя read-only filesystem, `no-new-privileges` и единственную capability `NET_BIND_SERVICE`. На портах 1024+ используется непривилегированный пользователь образа.
 
-```bash
-sudo /opt/telemt/update.sh 3.4.25
-```
+## Backup, обновление и перенос
 
-Можно указать `latest`, но стабильная версия предпочтительнее. Перед обновлением создаётся backup. Новый образ запускается по digest и должен пройти healthcheck; иначе возвращается предыдущий образ.
-
-## Backup и восстановление
+### Backup и restore
 
 ```bash
-mtproto backup
-mtproto backup /root/telemt-backup.tar.gz
-mtproto restore /root/telemt-backup.tar.gz
+sudo mtproto backup
+sudo mtproto backup /root/telemt-backup.tar.gz
+sudo mtproto restore /root/telemt-backup.tar.gz
 ```
 
-Backup включает конфигурацию, runtime-скрипты, HTML-заглушку, node_exporter и systemd units проекта.
+Backup включает конфигурацию, управляющие сценарии, HTTPS-заглушку, node_exporter, MTProto FIX и systemd units.
 
-## Миграция на другой сервер
+### Обновление с откатом
 
-Чтобы существующие клиенты переключились без изменения ссылки:
+```bash
+sudo mtproto update 3.4.25
+```
 
-1. Уменьшите TTL DNS заранее, если это возможно.
-2. Создайте backup на старом сервере или сохраните публичный домен, порт, Proxy Secret, ad-tag и TLS-домен.
-3. Запустите установщик на новом сервере.
-4. Укажите тот же публичный домен, тот же порт и прежний Proxy Secret.
-5. Для TLS-ссылок сохраните тот же TLS-домен; ad-tag также рекомендуется перенести.
-6. Проверьте новый сервер командой `mtproto doctor`.
-7. Смените A-запись домена на новый IP и дождитесь обновления DNS-кэша.
+Перед обновлением создаётся backup. Новый образ должен пройти healthcheck; иначе автоматически возвращается предыдущий digest.
 
-Клиенты, подключённые по доменному имени, продолжат использовать прежнюю ссылку. Если в ссылке указан старый IP или изменился порт, автоматического переключения не будет.
+### Перенос без изменения доменной ссылки
+
+1. Сохраните домен, порт, Proxy Secret, ad-tag и TLS-домен.
+2. Создайте backup.
+3. Запустите полную установку на новом сервере с теми же параметрами.
+4. Проверьте `sudo mtproto doctor`.
+5. Переключите DNS A-запись на новый IP.
+
+Если в ссылке указан IP или меняется порт/Secret, сохранить прежнюю ссылку невозможно.
+
+## Если что-то не работает
+
+### APT ждёт слишком долго
+
+Установщик ждёт только процессы, действительно удерживающие lock-файлы. Постоянный `unattended-upgrade-shutdown --wait-for-sig` не считается обновлением.
+
+Увеличить лимит ожидания:
+
+```bash
+sudo APT_LOCK_WAIT_SECONDS=1800 bash install.sh
+```
+
+Не удаляйте `/var/lib/dpkg/lock*` вручную.
+
+### GeoBlock ещё загружается
+
+```bash
+sudo systemctl status telemt-geoblock.service --no-pager -l
+sudo journalctl -u telemt-geoblock.service -n 50 --no-pager
+sudo mtproto geoblock status
+```
+
+Telemt продолжает работать, пока GeoBlock завершает атомарное обновление в фоне.
+
+### Клиент не подключается
+
+```bash
+sudo mtproto doctor
+sudo mtproto ports
+sudo mtproto client-debug 120
+sudo mtproto logs 200
+```
+
+Если во время попытки нет новых строк Telemt, соединение не дошло до сервера: проверьте внешний firewall, IP, порт и сеть клиента. Ping сам по себе не подтверждает доступность MTProto.
+
+### FIX не устанавливается
+
+Проверьте:
+
+```bash
+sudo modprobe xt_u32
+sudo iptables -m u32 -h
+sudo iptables -m hashlimit -h
+sudo iptables -C INPUT -j MTPR_SYNFIX
+```
+
+Последняя команда не должна находить старую внешнюю цепочку.
+
+## Требования
+
+- Debian, Ubuntu, RHEL, Fedora или CentOS;
+- Linux с systemd;
+- root или `sudo`;
+- минимум 1 ГБ свободного места для полной установки;
+- DNS A-запись для собственного домена и Let's Encrypt;
+- открытый TCP-порт прокси во внешнем firewall провайдера.
+
+Docker Compose v2, Certbot, Fail2ban и остальные зависимости полной установки устанавливаются автоматически.
+
+## Структура полной установки
+
+```text
+/opt/telemt/
+├── install.sh
+├── update.sh
+├── uninstall.sh
+├── doctor.sh
+├── backup.sh
+├── INSTALLATION-SUMMARY.txt
+├── docker-compose.yml
+├── config/
+│   ├── config.toml
+│   ├── installer.env
+│   └── stub/
+├── bin/
+│   ├── mtproto
+│   ├── mtproto-fix.sh
+│   ├── firewall.sh
+│   └── geoblock-update.sh
+├── licenses/
+├── stub/html/index.html
+├── node-exporter/
+├── cache/
+├── logs/
+└── backups/
+```
 
 ## Удаление
 
+Перед полным удалением при необходимости создайте backup:
+
 ```bash
-sudo /opt/telemt/uninstall.sh
+sudo mtproto backup
+sudo mtproto uninstall
 ```
 
-Деинсталлятор требует ввести `DELETE`, после чего полностью удаляет контейнеры проекта, образы при отсутствии других потребителей, firewall/ipset, systemd units, jail Fail2ban, сертификат заглушки, ссылку `mtproto`, `/opt/telemt` вместе с секретами и backups, а также legacy-каталоги `/opt/mtg` и `/opt/geo-exporter`. Операция необратима — заранее выполните `mtproto backup`, если данные нужны.
+Требуется вручную ввести `DELETE`. Удаляются контейнеры и файлы проекта, MTProto FIX, firewall/ipset, systemd units, jail Fail2ban, сертификаты, секреты и backups. Общесистемные пакеты Docker, Fail2ban и Certbot сохраняются, поскольку могут использоваться другими приложениями.
 
-Общесистемные пакеты Docker, Fail2ban и Certbot не удаляются: они могут использоваться другими приложениями.
+Чтобы отключить автономный FIX и удалить его iptables-правила:
 
-## Внешний firewall
-
-Скрипт управляет firewall внутри Linux, но не может изменить Security Group, Network ACL или firewall панели VPS. Разрешите выбранный TCP-порт Telemt у провайдера. Для выпуска Let's Encrypt временно требуется входящий TCP/80.
-
-| Порт | Доступ |
-|---|---|
-| Выбранный порт Telemt | Постоянно открыт публично в локальном firewall |
-| `443/tcp` | Постоянно открыт, если включён сайт без указания порта и Telemt использует другой порт |
-| `80/tcp` | Временно открывается для выпуска и продления Let's Encrypt |
-| `9091/tcp` | Только `127.0.0.1`, API Telemt |
-| Внутренний порт Nginx | Только `127.0.0.1`, снаружи не открывается |
-| `9090/tcp` | Telemt Prometheus; localhost либо точный IPv4 сервера мониторинга |
-| `9095/tcp` | GeoIP exporter; localhost либо точный IPv4 сервера мониторинга |
-| `9100/tcp` | node_exporter; localhost либо точный IPv4 сервера мониторинга |
-
-Установщик проверяет конфликты между этими портами. Внешний firewall провайдера необходимо проверить отдельно.
-
-Для исходящих соединений серверу требуются DNS (`53/udp`, при необходимости `53/tcp`) и `443/tcp` для Docker registry, Let's Encrypt/ACME, IPdeny, GeoIP и соединений Telemt с внешней инфраструктурой. Если у провайдера исходящий трафик фильтруется, проще разрешить established/related и не ограничивать egress для контейнера Telemt.
+```bash
+sudo mtproto-fix remove
+```
 
 ## Проект и лицензии
 
-Установщик, мастер и управляющие сценарии: **© 2026 ander1k**, лицензия MIT — см. [LICENSE](LICENSE).
+Установщик и управляющие сценарии: **© 2026 ander1k**, лицензия MIT — [LICENSE](LICENSE).
 
-Используемые независимые компоненты (Telemt, Docker, Nginx, Certbot, Fail2ban, Prometheus node_exporter, GeoLite и IPdeny) сохраняют собственные названия, авторство и лицензии. Репозиторий не заявляет авторство над ними.
+Telemt, Docker, Nginx, Certbot, Fail2ban, node_exporter, GeoLite, IPdeny и другие независимые компоненты сохраняют собственные названия, авторство и лицензии.
+
+MTProto FIX V3 интегрирован с сохранением авторства MEKO и оригинальной лицензии: [THIRD_PARTY_LICENSES/MTPROTO_FIX_By_MEKO-LICENSE.txt](THIRD_PARTY_LICENSES/MTPROTO_FIX_By_MEKO-LICENSE.txt).
 
 ---
 
 <div align="center">
 
-**[Telemt Installer](../../) · release v1.0**
+**Telemt Toolkit · один мастер, два режима, полный контроль**
 
 </div>
