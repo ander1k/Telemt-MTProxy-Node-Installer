@@ -4,7 +4,7 @@
 
 ### Telemt-прокси и MTProto FIX V3 — из одного понятного мастера
 
-[![Release](https://img.shields.io/badge/release-v1.0-22c55e?style=for-the-badge)](../../releases)
+[![Release](https://img.shields.io/badge/release-v1.2-22c55e?style=for-the-badge)](../../releases)
 [![Linux](https://img.shields.io/badge/Linux-Debian%20%7C%20Ubuntu%20%7C%20RHEL-0ea5e9?style=for-the-badge&logo=linux&logoColor=white)](#требования)
 [![Docker](https://img.shields.io/badge/Docker-hardened-2563eb?style=for-the-badge&logo=docker&logoColor=white)](#безопасность)
 [![License](https://img.shields.io/badge/installer-MIT-f59e0b?style=for-the-badge)](LICENSE)
@@ -72,15 +72,15 @@ sudo mtproto help
 ZIP:
 
 ```bash
-unzip telemt-installer-v1.0.zip
-cd telemt-installer-v1.0
+unzip telemt-installer-v1.2.zip
+cd telemt-installer-v1.2
 ```
 
 или TAR.GZ:
 
 ```bash
-tar -xzf telemt-installer-v1.0.tar.gz
-cd telemt-installer-v1.0
+tar -xzf telemt-installer-v1.2.tar.gz
+cd telemt-installer-v1.2
 ```
 
 ### 2. Запустите мастер
@@ -263,6 +263,30 @@ sudo mtproto help
 
 Обычный браузер видит сайт, а Telegram с правильным Secret — MTProto-прокси.
 
+### Telemt и сайт на одном TCP/443
+
+Это штатный и рекомендуемый вариант, если прокси должен работать на стандартном HTTPS-порту. Публичный `443` занимает только Telemt — отдельного Nginx на этом порту нет:
+
+```mermaid
+flowchart LR
+    Telegram --> Public["TCP/443 · Telemt"]
+    Browser["Браузер"] --> Public
+    Public --> Proxy["MTProto"]
+    Public --> Relay["HTTPS relay"]
+    Relay --> Nginx["127.0.0.1:9443 · Nginx"]
+```
+
+В результате используются два адреса с одним доменом:
+
+```text
+MTProto: tg://proxy?server=proxy.example.com&port=443&secret=...
+Сайт:    https://proxy.example.com/
+```
+
+Внутренний `9443` не нужно открывать в Security Group и нельзя публиковать наружу. Он предназначен только для связи Telemt с Nginx через loopback. MTProto FIX V3 также исключает loopback из SYN-фильтра, чтобы не мешать relay и healthcheck. Установщик проверяет сгенерированный `nginx.conf` и останавливается, если при `Telemt=443` обнаружит вторую директиву `listen 443`.
+
+Если Telemt выбран на другом порту, мастер отдельно предложит занять TCP/443 самим Nginx. Совпадение публичного порта Telemt и внутреннего порта Nginx запрещено.
+
 Доступны три шаблона:
 
 1. Private Cloud;
@@ -314,11 +338,11 @@ node_exporter:
 
 | Порт | Назначение | Внешний доступ |
 |---|---|---|
-| Выбранный порт Telemt | Telegram-прокси | Открыть постоянно |
-| `443/tcp` | Сайт без номера порта | Если включён отдельный публичный HTTPS |
+| Выбранный порт Telemt | Telegram-прокси; при `443` также вход для сайта через relay | Открыть постоянно |
+| `443/tcp` | Единственный listener Telemt либо отдельный Nginx, если Telemt использует другой порт | Открыть постоянно для сайта без номера порта |
 | `80/tcp` | Let's Encrypt | Открыть на время выпуска/продления |
 | `9091/tcp` | API Telemt | Только localhost |
-| Внутренний порт Nginx | Маскировка Telemt | Только localhost |
+| Внутренний порт Nginx (`9443` по умолчанию) | Relay маскировки Telemt | Только `127.0.0.1`, снаружи не открывать |
 | `9090/tcp` | Telemt Prometheus | Localhost или IP мониторинга |
 | `9095/tcp` | GeoIP exporter | Localhost или IP мониторинга |
 | `9100/tcp` | node_exporter | Localhost или IP мониторинга |
@@ -345,6 +369,7 @@ GeoBlock сначала загружает новый список во врем
 - каталог `/opt/telemt` — права `700`;
 - контейнеры — read-only filesystem и `no-new-privileges`;
 - capabilities сброшены;
+- Nginx работает внутри жёстко изолированного контейнера: read-only filesystem, `no-new-privileges`, `cap_drop: ALL` и только `SETUID/SETGID`; `NET_BIND_SERVICE` добавляется лишь отдельному Nginx на TCP/443;
 - образы фиксируются по content digest;
 - логи ограничены по размеру;
 - метрики снаружи доступны только точному IP мониторинга;

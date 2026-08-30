@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 umask 077
 
-# Telemt Installer v1.0
+# Telemt Installer v1.2
 # Repository: https://github.com/ander1k/telemt
 # Installer copyright (c) 2026 ander1k. MIT License.
 # Telemt itself remains an independent upstream project.
@@ -13,12 +13,12 @@ INSTALL_ROOT=/opt/telemt
 CONFIG_DIR=$INSTALL_ROOT/config
 DEFAULT_VERSION=3.4.25
 IMAGE_REPO=ghcr.io/telemt/telemt
-INSTALLER_VERSION=1.0
+INSTALLER_VERSION=1.2
 PROJECT_NAME="Telemt Installer"
 STEP_NO=0
 PHASE_LABEL="ВЫБОР РЕЖИМА"
 STEP_TIMER_PID=""; STEP_STARTED_AT=0; STEP_TITLE=""; STEP_ACTIVE=false; STEP_HEARTBEAT=false
-STUB_ENABLE=false; STUB_PORT=9443; STUB_PUBLIC_HTTPS=false
+STUB_ENABLE=false; STUB_PORT=9443; STUB_PUBLIC_HTTPS=false; STUB_ROUTE_MODE=disabled
 METRICS_ENABLE=false; METRICS_REMOTE=false; METRICS_PORT=9090
 GEO_ENABLE=false; GEO_METRICS_PORT=9095
 NODE_EXPORTER_ENABLE=false; NODE_EXPORTER_VERSION=1.5.0; NODE_EXPORTER_PORT=9100
@@ -470,7 +470,7 @@ result_end
 
 step "HTTPS-страница-заглушка"
 hint "Обычный браузер увидит сайт, а Telegram с правильным ключом — прокси."
-STUB_ENABLE=false; STUB_PORT=9443; STUB_PUBLIC_HTTPS=false; STUB_TEMPLATE=1; STUB_EMAIL=""; STUB_OWNER="root"; STUB_CERT_TYPE=none
+STUB_ENABLE=false; STUB_PORT=9443; STUB_PUBLIC_HTTPS=false; STUB_ROUTE_MODE=disabled; STUB_TEMPLATE=1; STUB_EMAIL=""; STUB_OWNER="root"; STUB_CERT_TYPE=none
 if yesno "Установить свою HTML5-страницу-заглушку?" Y; then
     STUB_ENABLE=true
     DEFAULT_STUB_DOMAIN=${PUBLIC_DOMAIN:-$TLS_DOMAIN}
@@ -495,9 +495,13 @@ if yesno "Установить свою HTML5-страницу-заглушку?
     if [[ -z "$PUBLIC_DOMAIN" ]]; then warn "Собственный публичный домен не указан: сначала будет создан self-signed сертификат"; fi
     if [[ "$PORT" == 443 ]]; then
         STUB_PUBLIC_HTTPS=true
-        info "Telemt уже использует стандартный HTTPS/443: домен будет открываться без указания порта"
+        STUB_ROUTE_MODE=telemt443
+        info "TCP/443 останется только у Telemt; сайт будет передаваться во внутренний Nginx на 127.0.0.1:${STUB_PORT}"
     elif yesno "Открывать заглушку также как https://${STUB_DOMAIN}/ без порта через TCP/443?" Y; then
         STUB_PUBLIC_HTTPS=true
+        STUB_ROUTE_MODE=direct443
+    else
+        STUB_ROUTE_MODE=telemt-port
     fi
 fi
 if [[ "$STUB_ENABLE" == true ]]; then
@@ -508,6 +512,8 @@ fi
 result_begin "HTTPS-заглушка"
 result_line "Состояние" "$([[ "$STUB_ENABLE" == true ]] && echo "включена" || echo "выключена")"
 [[ "$STUB_ENABLE" == true ]] && result_line "Маршрут" "${STUB_DOMAIN} → 127.0.0.1:${STUB_PORT}"
+[[ "$STUB_ROUTE_MODE" == telemt443 ]] && result_line "TCP/443" "только Telemt; Nginx не занимает публичный порт"
+[[ "$STUB_ROUTE_MODE" == direct443 ]] && result_line "TCP/443" "отдельный публичный listener Nginx"
 [[ "$STUB_ENABLE" == true ]] && result_line "Без порта" "$([[ "$STUB_PUBLIC_HTTPS" == true ]] && echo "https://${STUB_DOMAIN}/" || echo "выключено")"
 [[ "$STUB_ENABLE" == true ]] && result_line "HTML-шаблон" "$STUB_TEMPLATE"
 [[ "$STUB_ENABLE" == true ]] && result_line "SFTP-владелец" "$STUB_OWNER"
@@ -1019,6 +1025,7 @@ STUB_ENABLE=$STUB_ENABLE
 STUB_DOMAIN=${STUB_DOMAIN:-}
 STUB_PORT=$STUB_PORT
 STUB_PUBLIC_HTTPS=$STUB_PUBLIC_HTTPS
+STUB_ROUTE_MODE=$STUB_ROUTE_MODE
 STUB_OWNER=$STUB_OWNER
 STUB_EMAIL=$STUB_EMAIL
 STUB_CERT_TYPE=$STUB_CERT_TYPE
@@ -1055,10 +1062,14 @@ HTML
     esac
     STUB_GROUP=$(id -gn "$STUB_OWNER")
     chown "$STUB_OWNER:$STUB_GROUP" "$STUB_ROOT" "$STUB_ROOT/index.html"
+    chmod 755 "$STUB_ROOT"
     chmod 644 "$STUB_ROOT/index.html"
 
     PUBLIC_HTTPS_LISTEN=""
-    if [[ "$STUB_PUBLIC_HTTPS" == true && "$PORT" != 443 ]]; then PUBLIC_HTTPS_LISTEN="        listen 0.0.0.0:443 ssl;"; fi
+    # Nginx получает публичный 443 только в отдельном режиме direct443.
+    # При Telemt=443 значение telemt443 гарантирует единственного listener:
+    # Internet:443 -> Telemt -> 127.0.0.1:STUB_PORT -> Nginx.
+    if [[ "$STUB_ROUTE_MODE" == direct443 ]]; then PUBLIC_HTTPS_LISTEN="        listen 0.0.0.0:443 ssl;"; fi
     cat > "$STUB_CONFIG_DIR/nginx.conf" <<EOF
 user root;
 pid /tmp/nginx.pid;
@@ -1091,12 +1102,19 @@ ${PUBLIC_HTTPS_LISTEN}
 }
 EOF
     chmod 600 "$STUB_CONFIG_DIR/nginx.conf"
+    if [[ "$STUB_ROUTE_MODE" == telemt443 ]] && grep -Eq '^[[:space:]]*listen[[:space:]]+([^;]*:)?443[[:space:]]+ssl;' "$STUB_CONFIG_DIR/nginx.conf"; then
+        die "Ошибка генерации: при Telemt на TCP/443 Nginx не должен создавать собственный listener 443"
+    fi
+    if [[ "$STUB_ROUTE_MODE" == direct443 ]] && ! grep -Eq '^[[:space:]]*listen[[:space:]]+0\.0\.0\.0:443[[:space:]]+ssl;' "$STUB_CONFIG_DIR/nginx.conf"; then
+        die "Ошибка генерации: отдельный публичный Nginx не получил listener TCP/443"
+    fi
 
     cat > "$INSTALL_ROOT/bin/stub-cert.sh" <<'CERTSCRIPT'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 . /opt/telemt/config/installer.env
 STUB_PUBLIC_HTTPS=${STUB_PUBLIC_HTTPS:-false}
+STUB_ROUTE_MODE=${STUB_ROUTE_MODE:-$([[ "${PORT:-0}" == 443 ]] && echo telemt443 || echo telemt-port)}
 CERT_DIR=/opt/telemt/config/stub/certs
 save_type() { sed -i "s/^STUB_CERT_TYPE=.*/STUB_CERT_TYPE=$1/" /opt/telemt/config/installer.env; STUB_CERT_TYPE=$1; }
 self_signed() {
@@ -1154,8 +1172,8 @@ CERTSCRIPT
     [[ -n "$STUB_IMAGE" ]] || die "Не удалось зафиксировать digest Nginx"
     printf 'STUB_IMAGE=%s\n' "$STUB_IMAGE" >> "$INSTALL_ROOT/.env"
     printf 'COMPOSE_PROFILES=stub\n' >> "$INSTALL_ROOT/.env"
-    STUB_CAP_ADD=""
-    if [[ "$STUB_PUBLIC_HTTPS" == true && "$PORT" != 443 ]]; then STUB_CAP_ADD='    cap_add: ["NET_BIND_SERVICE"]'; fi
+    STUB_CAP_ADD='    cap_add: ["SETUID", "SETGID"]'
+    if [[ "$STUB_ROUTE_MODE" == direct443 ]]; then STUB_CAP_ADD='    cap_add: ["SETUID", "SETGID", "NET_BIND_SERVICE"]'; fi
     cat >> "$INSTALL_ROOT/docker-compose.yml" <<EOF
   stub:
     profiles: ["stub"]
@@ -1176,9 +1194,10 @@ ${STUB_CAP_ADD}
     security_opt: ["no-new-privileges:true"]
     healthcheck:
       test: ["CMD-SHELL", "wget --no-check-certificate -qO- https://127.0.0.1:${STUB_PORT}/ >/dev/null"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
+      interval: 5s
+      timeout: 3s
+      retries: 18
+      start_period: 5s
 EOF
     cat > /etc/systemd/system/telemt-stub-cert.service <<'UNIT'
 [Unit]
@@ -1499,6 +1518,11 @@ apply_rules() {
     iptables -w 5 -F "$FILTER_CHAIN"
     iptables -w 5 -t mangle -N "$MANGLE_CHAIN" 2>/dev/null || true
     iptables -w 5 -t mangle -F "$MANGLE_CHAIN"
+
+    # Локальный relay Telemt -> Nginx, API и healthcheck не должны попадать
+    # под публичный SYN-лимит V3, особенно при общем внешнем TCP/443.
+    iptables -w 5 -A "$FILTER_CHAIN" -i lo -j RETURN
+    iptables -w 5 -t mangle -A "$MANGLE_CHAIN" -i lo -j RETURN
 
     IFS=',' read -ra values <<< "$ports"
     for item in "${values[@]}"; do
@@ -1911,6 +1935,7 @@ set -Eeuo pipefail
 ROOT=/opt/telemt; CONFIG=/opt/telemt/config/config.toml; COMPOSE=(docker compose --env-file "$ROOT/.env" -f "$ROOT/docker-compose.yml")
 . /opt/telemt/config/installer.env
 STUB_PUBLIC_HTTPS=${STUB_PUBLIC_HTTPS:-false}
+STUB_ROUTE_MODE=${STUB_ROUTE_MODE:-$([[ "${PORT:-0}" == 443 ]] && echo telemt443 || echo telemt-port)}
 NODE_EXPORTER_ENABLE=${NODE_EXPORTER_ENABLE:-false}
 NODE_EXPORTER_VERSION=${NODE_EXPORTER_VERSION:-1.5.0}
 NODE_EXPORTER_PORT=${NODE_EXPORTER_PORT:-9100}
@@ -2065,6 +2090,8 @@ case "${1:-}" in
     echo "== САЙТ-ЗАГЛУШКА =="
     if [[ -n "$site_url" ]]; then
       echo "Основной адрес: $site_url"
+      if [[ "$STUB_ROUTE_MODE" == telemt443 ]]; then echo "Маршрут: public TCP/443 → Telemt → 127.0.0.1:$STUB_PORT (Nginx)"; fi
+      if [[ "$STUB_ROUTE_MODE" == direct443 ]]; then echo "Маршрут: public TCP/443 → Nginx; Telemt работает на TCP/$PORT"; fi
       [[ -z "$site_telemt_url" || "$site_telemt_url" == "$site_url" ]] || echo "Через порт Telemt: $site_telemt_url"
       echo "HTML по SFTP: /opt/telemt/stub/html/index.html"
       echo "Сертификат: ${STUB_CERT_TYPE:-не определён}"
@@ -2080,6 +2107,7 @@ case "${1:-}" in
     echo
     echo "== ПОРТЫ =="
     echo "TCP/$PORT — Telemt, публичный"
+    [[ "$STUB_ROUTE_MODE" == telemt443 ]] && echo "  ↳ обычный HTTPS Telemt передаёт во внутренний Nginx 127.0.0.1:$STUB_PORT"
     [[ "$MTPROTO_FIX_ENABLE" == true ]] && echo "MTProto FIX V3: TCP $MTPROTO_FIX_PORTS"
     echo "TCP/9091 — API Telemt, только localhost"
     [[ "$STUB_ENABLE" == true ]] && echo "TCP/$STUB_PORT — Nginx-заглушка, только localhost"
@@ -2179,6 +2207,7 @@ case "${1:-}" in
         [[ "$STUB_ENABLE" == true ]] || { echo "Страница-заглушка выключена"; exit 0; }
         docker ps --filter name=telemt-stub --format 'table {{.Names}}\t{{.Status}}'
         echo | openssl s_client -connect "127.0.0.1:$STUB_PORT" -servername "$STUB_DOMAIN" 2>/dev/null | openssl x509 -noout -subject -issuer -dates
+        [[ "$STUB_ROUTE_MODE" == telemt443 ]] && echo "Маршрут: TCP/443 принадлежит Telemt; Nginx доступен только через relay 127.0.0.1:$STUB_PORT"
         echo "Файл: /opt/telemt/stub/html/index.html; владелец: $STUB_OWNER"
         ;;
       check)
@@ -2246,10 +2275,13 @@ case "${1:-}" in
       for fix_doctor_port in "${fix_doctor_ports[@]}"; do
         iptables -C TELEMT_MTPROTO_FIX -p tcp --syn --dport "$fix_doctor_port" -j REJECT --reject-with tcp-reset >/dev/null 2>&1 && echo "OK: MTProto FIX TCP/$fix_doctor_port reject layer" || { echo "FAIL: MTProto FIX TCP/$fix_doctor_port"; failures=$((failures+1)); }
       done
+      iptables -C TELEMT_MTPROTO_FIX -i lo -j RETURN >/dev/null 2>&1 && iptables -t mangle -C TELEMT_MTPROTO_MARK -i lo -j RETURN >/dev/null 2>&1 && echo "OK: MTProto FIX bypasses loopback relay" || { echo "FAIL: MTProto FIX filters loopback relay"; failures=$((failures+1)); }
     fi
     if [[ "$STUB_ENABLE" == true ]]; then
       curl -kfsS --resolve "$STUB_DOMAIN:$STUB_PORT:127.0.0.1" "https://$STUB_DOMAIN:$STUB_PORT/" >/dev/null && echo "OK: Nginx stub direct" || { echo "FAIL: Nginx stub"; failures=$((failures+1)); }
       curl -kfsS --resolve "$STUB_DOMAIN:$PORT:127.0.0.1" "https://$STUB_DOMAIN:$PORT/" >/dev/null && echo "OK: stub through Telemt" || { echo "FAIL: mask relay"; failures=$((failures+1)); }
+      ss -H -ltn "sport = :$STUB_PORT" | awk '{print $4}' | grep -Eq "^127\\.0\\.0\\.1:$STUB_PORT$" && echo "OK: Nginx internal port is loopback-only" || { echo "FAIL: Nginx internal port is exposed"; failures=$((failures+1)); }
+      if [[ "$STUB_ROUTE_MODE" == telemt443 ]]; then ! grep -Eq '^[[:space:]]*listen[[:space:]]+([^;]*:)?443[[:space:]]+ssl;' /opt/telemt/config/stub/nginx.conf && echo "OK: Nginx has no duplicate TCP/443 listener" || { echo "FAIL: Nginx conflicts with Telemt on TCP/443"; failures=$((failures+1)); }; fi
       if [[ "$STUB_PUBLIC_HTTPS" == true && "$PORT" != 443 ]]; then curl -kfsS --resolve "$STUB_DOMAIN:443:127.0.0.1" "https://$STUB_DOMAIN/" >/dev/null && echo "OK: public website HTTPS/443" || { echo "FAIL: public website HTTPS/443"; failures=$((failures+1)); }; fi
       openssl x509 -checkend 604800 -noout -in /opt/telemt/config/stub/certs/fullchain.pem >/dev/null && echo "OK: stub certificate lifetime" || echo "WARN: stub certificate expires within 7 days"
     fi
@@ -2393,6 +2425,11 @@ if [[ "$STATUS" != healthy ]]; then
     die "Telemt не прошёл healthcheck"
 fi
 ok "Telemt healthy"
+TELEMT_PID=$(docker inspect -f '{{.State.Pid}}' telemt 2>/dev/null || true)
+if [[ "$PORT" == 443 ]]; then
+    [[ "$TELEMT_PID" =~ ^[1-9][0-9]*$ ]] && ss -H -ltnp 'sport = :443' 2>/dev/null | grep -Fq "pid=$TELEMT_PID," || die "TCP/443 слушает не процесс контейнера Telemt"
+    ok "TCP/443 принадлежит только Telemt"
+fi
 if [[ "$AUTO_RESTART_ENABLE" == true ]]; then
     systemctl restart telemt-auto-restart.timer
     systemctl is-active --quiet telemt-auto-restart.timer || die "Таймер планового перезапуска не запустился"
@@ -2401,12 +2438,17 @@ fi
 if [[ "$FAIL2BAN_ENABLE" == true ]]; then fail2ban-client status sshd >/dev/null && ok "Fail2ban sshd active"; fi
 if [[ "$STUB_ENABLE" == true ]]; then
     STUB_STATUS=""
-    for _ in {1..20}; do
+    for _ in {1..45}; do
         STUB_STATUS=$(docker inspect -f '{{.State.Health.Status}}' telemt-stub 2>/dev/null || true)
         [[ "$STUB_STATUS" == healthy ]] && break
-        sleep 1
+        sleep 2
     done
-    [[ "$STUB_STATUS" == healthy ]] || die "Nginx-заглушка не прошла healthcheck"
+    if [[ "$STUB_STATUS" != healthy ]]; then
+        docker compose --env-file .env -f docker-compose.yml logs --tail 100 stub
+        die "Nginx-заглушка не прошла healthcheck за 90 секунд"
+    fi
+    ss -H -ltn "sport = :$STUB_PORT" | awk '{print $4}' | grep -Eq "^127\\.0\\.0\\.1:$STUB_PORT$" || die "Внутренний порт Nginx TCP/$STUB_PORT должен слушать только 127.0.0.1"
+    [[ "$STUB_ROUTE_MODE" != telemt443 ]] || ok "Маршрут 443: Telemt → внутренний Nginx 127.0.0.1:$STUB_PORT"
     mtproto stub check
     ok "HTTPS-заглушка проверена через openssl и curl"
 fi
@@ -2481,6 +2523,7 @@ result_line "Автоперезапуск" "$AUTO_RESTART_LABEL"
 result_end
 result_begin "порты после установки"
 result_line "TCP/$PORT" "разрешён локальным firewall; Telemt слушает"
+[[ "$STUB_ROUTE_MODE" == telemt443 ]] && result_line "HTTPS на TCP/443" "Telemt передаёт обычный браузерный трафик в Nginx 127.0.0.1:$STUB_PORT"
 [[ "$STUB_PUBLIC_HTTPS" == true && "$PORT" != 443 ]] && result_line "TCP/443" "публичная заглушка без указания порта"
 result_line "TCP/80" "$([[ "$STUB_ENABLE" == true ]] && echo "открывается временно для Certbot" || echo "не используется")"
 result_line "TCP/9091" "локальный API, снаружи закрыт"

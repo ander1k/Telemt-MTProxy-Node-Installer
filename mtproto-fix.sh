@@ -74,6 +74,11 @@ apply_rules() {
     iptables -w 5 -t mangle -N "$MANGLE_CHAIN" 2>/dev/null || true
     iptables -w 5 -t mangle -F "$MANGLE_CHAIN"
 
+    # Локальный relay Telemt -> Nginx, API и healthcheck не должны попадать
+    # под публичный SYN-лимит V3, особенно при общем внешнем TCP/443.
+    iptables -w 5 -A "$FILTER_CHAIN" -i lo -j RETURN
+    iptables -w 5 -t mangle -A "$MANGLE_CHAIN" -i lo -j RETURN
+
     IFS=',' read -ra values <<< "$ports"
     for item in "${values[@]}"; do
         # V3: сигнатура u32 маркирует только SYN выбранного TCP-порта.
