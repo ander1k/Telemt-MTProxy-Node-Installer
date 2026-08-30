@@ -16,6 +16,7 @@ IMAGE_REPO=ghcr.io/telemt/telemt
 INSTALLER_VERSION=1.0
 PROJECT_NAME="Telemt Installer"
 STEP_NO=0
+PHASE_LABEL="ВЫБОР РЕЖИМА"
 STEP_TIMER_PID=""; STEP_STARTED_AT=0; STEP_TITLE=""; STEP_ACTIVE=false; STEP_HEARTBEAT=false
 STUB_ENABLE=false; STUB_PORT=9443; STUB_PUBLIC_HTTPS=false
 METRICS_ENABLE=false; METRICS_REMOTE=false; METRICS_PORT=9090
@@ -23,6 +24,7 @@ GEO_ENABLE=false; GEO_METRICS_PORT=9095
 NODE_EXPORTER_ENABLE=false; NODE_EXPORTER_VERSION=1.5.0; NODE_EXPORTER_PORT=9100
 NODE_EXPORTER_SHA256=af999fd31ab54ed3a34b9f0b10c28e9acee9ef5ac5a5d5edfdde85437db7acbb
 AUTO_RESTART_ENABLE=true; AUTO_RESTART_INTERVAL=30min; AUTO_RESTART_LABEL="30 минут"
+MTPROTO_FIX_ENABLE=true; MTPROTO_FIX_TYPE=v3; MTPROTO_FIX_PORTS=""
 GEOBLOCK_STATUS=not_configured
 
 finish_step_timer() {
@@ -30,13 +32,13 @@ finish_step_timer() {
     [[ "${STEP_ACTIVE:-false}" == true ]] || return 0
     if [[ -n "${STEP_TIMER_PID:-}" ]]; then kill "$STEP_TIMER_PID" 2>/dev/null || true; wait "$STEP_TIMER_PID" 2>/dev/null || true; fi
     finished_at=$(date +%s); elapsed=$((finished_at - STEP_STARTED_AT))
-    printf "${GREEN}  ✔ ШАГ %02d завершён за %d сек.${NC}\n" "$STEP_NO" "$elapsed"
+    printf "${GREEN}  ✔ %s — %d сек.${NC}\n" "$STEP_TITLE" "$elapsed"
     STEP_TIMER_PID=""; STEP_ACTIVE=false
 }
 step() {
     finish_step_timer
     STEP_NO=$((STEP_NO+1)); STEP_TITLE=$1; STEP_STARTED_AT=$(date +%s); STEP_ACTIVE=true
-    echo ""; printf "${BLUE}╭─${NC} ${BOLD}${CYAN}ШАГ %02d${NC} ${BLUE}─────────────────────────────────────────${NC}\n" "$STEP_NO"; printf "${BLUE}│${NC} ${BOLD}%s${NC}\n" "$1"; echo -e "${BLUE}╰──────────────────────────────────────────────────${NC}"
+    echo ""; printf "${BLUE}╭─${NC} ${BOLD}${CYAN}%s · ШАГ %02d${NC} ${BLUE}────────────────────────────${NC}\n" "$PHASE_LABEL" "$STEP_NO"; printf "${BLUE}│${NC} ${BOLD}%s${NC}\n" "$1"; echo -e "${BLUE}╰──────────────────────────────────────────────────${NC}"
     if [[ "$STEP_HEARTBEAT" == true ]]; then
         (
             while sleep 5; do
@@ -47,13 +49,28 @@ step() {
         STEP_TIMER_PID=$!
     fi
 }
+phase() {
+    finish_step_timer
+    PHASE_LABEL=$1
+    STEP_NO=0
+    echo ""
+    echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━  ${PHASE_LABEL}  ━━━━━━━━━━━━━━━━${NC}"
+    [[ -z "${2:-}" ]] || echo -e "${BLUE}  $2${NC}"
+}
+banner() {
+    clear 2>/dev/null || true
+    echo -e "${CYAN}╔════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║${NC} ${BOLD}${GREEN}●${NC} ${BOLD}TELEMT TOOLKIT${NC}                                    ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}   ${BLUE}Telemt stack и MTProto FIX · v${INSTALLER_VERSION}${NC}              ${CYAN}║${NC}"
+    echo -e "${CYAN}╚════════════════════════════════════════════════════╝${NC}"
+}
 ok()   { echo -e "${GREEN}  ✔ $1${NC}"; }
 warn() { echo -e "${YELLOW}  ⚠ $1${NC}"; }
 info() { echo -e "${CYAN}  → $1${NC}"; }
 hint() { echo -e "${BLUE}  ℹ $1${NC}"; }
 option() { printf "  ${GREEN}%s${NC}) ${BOLD}%s${NC}" "$1" "$2"; [[ -n "${3:-}" ]] && printf " ${CYAN}— %s${NC}" "$3"; printf "\n"; }
 result_begin() { echo -e "${GREEN}  ╭─ РЕЗУЛЬТАТ: ${BOLD}$1${NC}"; }
-result_line() { printf "${GREEN}  │${NC} %-20s ${BOLD}%s${NC}\n" "$1" "$2"; }
+result_line() { printf "${GREEN}  │${NC} ${CYAN}%s:${NC} ${BOLD}%s${NC}\n" "$1" "$2"; }
 result_end() { echo -e "${GREEN}  ╰────────────────────────────────────────────────${NC}"; }
 safe_install() {
     local mode=$1 source=$2 target=$3
@@ -143,6 +160,154 @@ apt_get() {
     apt-get -o DPkg::Lock::Timeout="$APT_LOCK_WAIT_SECONDS" "$@"
 }
 
+detect_package_family() {
+    [[ -r /etc/os-release ]] || die "Не удалось определить операционную систему"
+    . /etc/os-release
+    case "${ID_LIKE:-$ID}" in
+        *debian*|*ubuntu*) PKG_FAMILY=apt ;;
+        *rhel*|*fedora*|*centos*) PKG_FAMILY=dnf ;;
+        *) die "Поддерживаются Debian/Ubuntu и RHEL/Fedora/CentOS" ;;
+    esac
+}
+
+normalize_port_list() {
+    local raw=${1//[[:space:]]/} item normalized=""
+    local -a values=()
+    local -A seen=()
+    IFS=',' read -ra values <<< "$raw"
+    [[ ${#values[@]} -gt 0 ]] || return 1
+    for item in "${values[@]}"; do
+        [[ "$item" =~ ^[0-9]+$ ]] && (( item >= 1 && item <= 65535 )) || return 1
+        [[ -n "${seen[$item]:-}" ]] && continue
+        seen[$item]=1
+        normalized+="${normalized:+,}${item}"
+    done
+    [[ -n "$normalized" ]] || return 1
+    printf '%s\n' "$normalized"
+}
+
+fix_env_set() {
+    local file=$1 key=$2 value=$3
+    if grep -q "^${key}=" "$file" 2>/dev/null; then
+        sed -i "s|^${key}=.*|${key}=${value}|" "$file"
+    else
+        printf '%s=%s\n' "$key" "$value" >> "$file"
+    fi
+}
+
+install_fix_only() {
+    local default_port=443 ports="" fix_source first_port listening_ports
+    detect_package_family
+    fix_source=""
+    [[ -f "${SOURCE_DIR}/mtproto-fix.sh" ]] && fix_source="${SOURCE_DIR}/mtproto-fix.sh"
+    [[ -z "$fix_source" && -f "$INSTALL_ROOT/bin/mtproto-fix.sh" ]] && fix_source="$INSTALL_ROOT/bin/mtproto-fix.sh"
+    [[ -n "$fix_source" ]] || die "Файл mtproto-fix.sh отсутствует рядом с install.sh; распакуйте полный архив установщика"
+    if [[ -d "$INSTALL_ROOT" && ! -f "$CONFIG_DIR/installer.env" && ! -f "$INSTALL_ROOT/bin/mtproto-fix.sh" ]]; then
+        if find "$INSTALL_ROOT" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .; then
+            die "$INSTALL_ROOT уже занят неизвестной установкой; выберите другой сервер или освободите каталог вручную после проверки"
+        fi
+    fi
+    if [[ -e /usr/local/bin/mtproto-fix || -L /usr/local/bin/mtproto-fix ]]; then
+        [[ -L /usr/local/bin/mtproto-fix && $(readlink /usr/local/bin/mtproto-fix) == "$INSTALL_ROOT/bin/mtproto-fix.sh" ]] || \
+            die "/usr/local/bin/mtproto-fix уже принадлежит другой установке"
+    fi
+    if [[ -f /etc/systemd/system/telemt-mtproto-fix.service ]] && ! grep -q '^ExecStart=/opt/telemt/bin/mtproto-fix.sh apply$' /etc/systemd/system/telemt-mtproto-fix.service; then
+        die "telemt-mtproto-fix.service уже существует, но запускает неизвестный файл"
+    fi
+    if command -v iptables >/dev/null 2>&1 && iptables -w 5 -C INPUT -j MTPR_SYNFIX 2>/dev/null; then
+        die "Обнаружен внешний MTPR_SYNFIX. Сначала удалите его через mekopr, затем повторите установку"
+    fi
+    if [[ -f /opt/telemt/config/installer.env ]]; then
+        default_port=$(awk -F= '$1=="PORT"{gsub(/[^0-9]/,"",$2); if ($2) print $2; exit}' /opt/telemt/config/installer.env)
+        default_port=${default_port:-443}
+    fi
+
+    phase "НАСТРОЙКА FIX" "Только V3 iptables: Telemt, Docker и Proxy Secret не изменяются."
+    step "Порт MTProto-прокси"
+    hint "Укажите порт уже работающего прокси. Можно несколько через запятую: 443,8443."
+    if command -v ss >/dev/null 2>&1; then
+        echo -e "${BLUE}  Сейчас слушаются TCP-порты:${NC}"
+        listening_ports=$(ss -H -ltn 2>/dev/null | awk '{sub(/.*:/,"",$4); if ($4 ~ /^[0-9]+$/) print $4}' | sort -nu | paste -sd, - || true)
+        echo "  ${listening_ports:-не удалось определить}"
+    fi
+    while true; do
+        read -rp "$(echo -e "${YELLOW}Порт или порты FIX [${default_port}]: ${NC}")" ports
+        ports=$(normalize_port_list "${ports:-$default_port}") && break
+        warn "Введите TCP-порт 1–65535 или список через запятую"
+    done
+    result_begin "план установки"
+    result_line "Компонент" "MTProto FIX V3 iptables"
+    result_line "Порты" "$ports"
+    result_line "Изменения" "две отдельные iptables-цепочки + systemd"
+    result_line "Не меняется" "Telemt, ссылка, secret, Docker и GeoBlock"
+    result_end
+    warn "Если внешний MTPR_SYNFIX уже установлен через mekopr, мастер остановится без создания второго набора правил."
+    yesno "Установить только MTProto FIX V3?" Y || { STEP_ACTIVE=false; info "Установка отменена — сервер не изменён"; exit 0; }
+
+    STEP_HEARTBEAT=true
+    phase "УСТАНОВКА FIX" "Подготовка модулей, файлов и постоянных правил."
+    step "Системные зависимости"
+    if [[ "$PKG_FAMILY" == apt ]]; then
+        apt_get update -qq
+        DEBIAN_FRONTEND=noninteractive apt_get install -y -qq iptables kmod util-linux >/dev/null
+    else
+        dnf install -y iptables kmod util-linux >/dev/null
+    fi
+    ok "iptables, xt_u32/hashlimit loader и служебные инструменты готовы"
+
+    step "Файлы MTProto FIX"
+    mkdir -p "$INSTALL_ROOT/bin" "$CONFIG_DIR" "$INSTALL_ROOT/licenses"
+    chmod 700 "$INSTALL_ROOT" "$INSTALL_ROOT/bin" "$CONFIG_DIR" "$INSTALL_ROOT/licenses"
+    safe_install 700 "$fix_source" "$INSTALL_ROOT/bin/mtproto-fix.sh"
+    if [[ -f "${SOURCE_DIR}/THIRD_PARTY_LICENSES/MTPROTO_FIX_By_MEKO-LICENSE.txt" ]]; then
+        safe_install 600 "${SOURCE_DIR}/THIRD_PARTY_LICENSES/MTPROTO_FIX_By_MEKO-LICENSE.txt" "$INSTALL_ROOT/licenses/MTPROTO_FIX_By_MEKO-LICENSE.txt"
+    fi
+    if [[ ! -f "$CONFIG_DIR/installer.env" ]]; then
+        first_port=${ports%%,*}
+        printf 'PORT=%s\nMTPROTO_FIX_ENABLE=true\nMTPROTO_FIX_TYPE=v3\nMTPROTO_FIX_PORTS="%s"\n' "$first_port" "$ports" > "$CONFIG_DIR/installer.env"
+        : > "$INSTALL_ROOT/.fix-only-install"
+        chmod 600 "$INSTALL_ROOT/.fix-only-install"
+    else
+        fix_env_set "$CONFIG_DIR/installer.env" MTPROTO_FIX_ENABLE true
+        fix_env_set "$CONFIG_DIR/installer.env" MTPROTO_FIX_TYPE v3
+        fix_env_set "$CONFIG_DIR/installer.env" MTPROTO_FIX_PORTS "\"$ports\""
+    fi
+    chmod 600 "$CONFIG_DIR/installer.env"
+    ln -sfn "$INSTALL_ROOT/bin/mtproto-fix.sh" /usr/local/bin/mtproto-fix
+
+    cat > /etc/systemd/system/telemt-mtproto-fix.service <<'UNIT'
+[Unit]
+Description=Telemt MTProto FIX V3 iptables rules
+Documentation=https://github.com/Mekotofeuka/MTPROTO_FIX_By_MEKO
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/opt/telemt/bin/mtproto-fix.sh apply
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+UNIT
+    systemctl daemon-reload
+
+    step "Применение V3 iptables"
+    "$INSTALL_ROOT/bin/mtproto-fix.sh" install "$ports"
+
+    STEP_HEARTBEAT=false
+    phase "ПРОВЕРКА" "Готовность и команды управления."
+    step "Состояние MTProto FIX"
+    "$INSTALL_ROOT/bin/mtproto-fix.sh" status
+    finish_step_timer
+    echo ""
+    echo -e "${GREEN}${BOLD}  ✔ MTProto FIX V3 успешно установлен${NC}"
+    echo -e "  Порты:       ${BOLD}${ports}${NC}"
+    echo -e "  Меню:        ${CYAN}sudo mtproto-fix${NC}"
+    echo -e "  Статус:      ${CYAN}sudo mtproto-fix status${NC}"
+    echo -e "  Перенастройка: ${CYAN}sudo mtproto-fix install 443,8443${NC}"
+    echo -e "  Удалить FIX: ${CYAN}sudo mtproto-fix remove${NC}"
+    exit 0
+}
+
 on_error() {
     local rc=$?
     finish_step_timer
@@ -155,25 +320,29 @@ trap finish_step_timer EXIT
 
 [[ $(id -u) -eq 0 ]] || die "Запустите установщик от root: sudo bash install.sh"
 [[ -d /run/systemd/system ]] || die "Требуется Linux с systemd"
+SOURCE_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
-clear 2>/dev/null || true
-echo -e "${CYAN}╔══════════════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}║${NC}  ${BOLD}${GREEN}●${NC} ${BOLD}TELEMT INSTALLER${NC}                             ${CYAN}║${NC}"
-echo -e "${CYAN}║${NC}    ${BLUE}Secure MTProto stack · release v${INSTALLER_VERSION}${NC}          ${CYAN}║${NC}"
-echo -e "${CYAN}╚══════════════════════════════════════════════════╝${NC}"
-echo -e "${GREEN}  ✔${NC} Безопасные значения по умолчанию"
-echo -e "${CYAN}  →${NC} Каждый выбор сопровождается подсказкой"
-echo -e "${YELLOW}  ⚠${NC} Изменения применятся только после итогового подтверждения"
-echo -e "${BLUE}  Каталог установки: ${INSTALL_ROOT}${NC}"
+banner
+echo -e "${BOLD}  Что установить?${NC}"
+echo ""
+option 1 "Полная система Telemt" "прокси, firewall, FIX, мониторинг и команды управления"
+option 2 "Только MTProto FIX V3" "для уже установленного MTProto-прокси"
+option 0 "Выход" "сервер не изменяется"
+echo ""
+read -rp "$(echo -e "${YELLOW}Выберите режим [1]: ${NC}")" INSTALL_MODE_CHOICE
+INSTALL_MODE_CHOICE=${INSTALL_MODE_CHOICE:-1}
+case "$INSTALL_MODE_CHOICE" in
+    1) INSTALL_MODE=full; ok "Выбрана полная установка Telemt" ;;
+    2) INSTALL_MODE=fix-only; ok "Выбрана установка только MTProto FIX V3" ;;
+    0) info "Выход без изменений"; exit 0 ;;
+    *) die "Выберите 1, 2 или 0" ;;
+esac
+[[ "$INSTALL_MODE" == fix-only ]] && install_fix_only
+
+phase "НАСТРОЙКА СИСТЕМЫ" "Сначала собираем параметры. Сервер изменится только после подтверждения плана."
 
 step "Предварительная проверка"
-[[ -r /etc/os-release ]] || die "Не удалось определить операционную систему"
-. /etc/os-release
-case "${ID_LIKE:-$ID}" in
-    *debian*|*ubuntu*) PKG_FAMILY=apt ;;
-    *rhel*|*fedora*|*centos*) PKG_FAMILY=dnf ;;
-    *) die "Поддерживаются Debian/Ubuntu и RHEL/Fedora/CentOS" ;;
-esac
+detect_package_family
 
 AVAILABLE_MB=$(df -Pm /opt 2>/dev/null | awk 'NR==2 {print $4}' || echo 0)
 [[ "$AVAILABLE_MB" -ge 1024 ]] || warn "Свободно менее 1 ГБ на разделе /opt"
@@ -506,6 +675,48 @@ result_line "Интервал" "$AUTO_RESTART_LABEL"
 result_line "Контроль" "$([[ "$AUTO_RESTART_ENABLE" == true ]] && echo "systemd timer + healthcheck" || echo "не применяется")"
 result_end
 
+step "MTProto FIX"
+hint "V3 iptables разделяет SYN-пакеты iOS по сигнатуре u32; для остальных клиентов действует лимит 54 SYN/минуту с одного IP."
+warn "Фикс помогает при характерной двухминутной блокировке/зависании подключения, но не восстанавливает уже заблокированный IP или порт."
+option 1 "Установить V3 iptables" "рекомендуемый режим из MTProto FIX By MEKO"
+option 0 "Не требуется" "не изменять SYN-обработку"
+read -rp "$(echo -e "${YELLOW}MTProto FIX [1]: ${NC}")" MTPROTO_FIX_CHOICE
+MTPROTO_FIX_CHOICE=${MTPROTO_FIX_CHOICE:-1}
+case "$MTPROTO_FIX_CHOICE" in
+    1) MTPROTO_FIX_ENABLE=true ;;
+    0) MTPROTO_FIX_ENABLE=false ;;
+    *) die "Неизвестный вариант MTProto FIX" ;;
+esac
+if [[ "$MTPROTO_FIX_ENABLE" == true ]]; then
+    while true; do
+        read -rp "$(echo -e "${YELLOW}Порт или порты FIX через запятую [${PORT}]: ${NC}")" MTPROTO_FIX_PORTS
+        MTPROTO_FIX_PORTS=${MTPROTO_FIX_PORTS:-$PORT}
+        MTPROTO_FIX_PORTS=$(tr -d '[:space:]' <<< "$MTPROTO_FIX_PORTS")
+        FIX_PORTS_VALID=true
+        IFS=',' read -ra FIX_PORT_ARRAY <<< "$MTPROTO_FIX_PORTS"
+        [[ ${#FIX_PORT_ARRAY[@]} -gt 0 ]] || FIX_PORTS_VALID=false
+        declare -A FIX_PORT_SEEN=()
+        FIX_PORTS_NORMALIZED=""
+        for fix_port in "${FIX_PORT_ARRAY[@]}"; do
+            if ! [[ "$fix_port" =~ ^[0-9]+$ ]] || (( fix_port < 1 || fix_port > 65535 )); then FIX_PORTS_VALID=false; break; fi
+            [[ -n "${FIX_PORT_SEEN[$fix_port]:-}" ]] && continue
+            FIX_PORT_SEEN[$fix_port]=1
+            FIX_PORTS_NORMALIZED+="${FIX_PORTS_NORMALIZED:+,}${fix_port}"
+        done
+        [[ "$FIX_PORTS_VALID" == true ]] && { MTPROTO_FIX_PORTS=$FIX_PORTS_NORMALIZED; break; }
+        warn "Введите один или несколько TCP-портов 1–65535 через запятую"
+    done
+    if [[ ",$MTPROTO_FIX_PORTS," != *",$PORT,"* ]]; then
+        warn "Среди портов FIX нет текущего порта Telemt TCP/$PORT — на него правила V3 не подействуют"
+    fi
+fi
+result_begin "MTProto FIX"
+result_line "Состояние" "$([[ "$MTPROTO_FIX_ENABLE" == true ]] && echo "будет установлен" || echo "не требуется")"
+result_line "Тип" "$([[ "$MTPROTO_FIX_ENABLE" == true ]] && echo "V3 iptables / u32" || echo "не применяется")"
+result_line "Порты" "$([[ "$MTPROTO_FIX_ENABLE" == true ]] && echo "$MTPROTO_FIX_PORTS" || echo "не применяются")"
+result_line "Управление" "$([[ "$MTPROTO_FIX_ENABLE" == true ]] && echo "mtproto fix" || echo "можно установить позже: mtproto fix")"
+result_end
+
 step "Итоговый план"
 hint "Проверьте параметры. До ответа «Y» настройки сервера не изменяются."
 echo -e "  Telemt:          ${BOLD}${TELEMT_VERSION}${NC}"
@@ -521,6 +732,7 @@ echo -e "  GeoBlock:        ${SELECTED_NAMES:-выключен}; scope=${GEO_SCO
 echo -e "  IPv6:            ${IPV6_MODE}"
 echo -e "  SSH исключения:  ${SSH_PORTS}"
 echo -e "  Fail2ban:        ${FAIL2BAN_ENABLE}"
+echo -e "  MTProto FIX:     $([[ "$MTPROTO_FIX_ENABLE" == true ]] && echo "V3 iptables; TCP ${MTPROTO_FIX_PORTS}" || echo "не требуется")"
 echo -e "  Автоперезапуск:  ${AUTO_RESTART_LABEL}"
 echo -e "  HTTPS-заглушка:  ${STUB_ENABLE}$([[ "$STUB_ENABLE" == true ]] && echo " (${STUB_DOMAIN} → 127.0.0.1:${STUB_PORT}, шаблон ${STUB_TEMPLATE})")"
 result_begin "карта портов"
@@ -548,11 +760,12 @@ if [[ "$METRICS_REMOTE" == true ]]; then
 fi
 yesno "Применить этот план?" Y || die "Отменено пользователем"
 STEP_HEARTBEAT=true
+phase "УСТАНОВКА СИСТЕМЫ" "Пакеты, конфигурация и службы. Повторный запуск безопасен."
 
 step "Зависимости"
 if [[ "$PKG_FAMILY" == apt ]]; then
     apt_get update -qq
-    DEBIAN_FRONTEND=noninteractive apt_get install -y -qq ca-certificates curl wget jq iproute2 ipset iptables tar gzip openssl util-linux >/dev/null
+    DEBIAN_FRONTEND=noninteractive apt_get install -y -qq ca-certificates curl wget jq iproute2 ipset iptables kmod tar gzip openssl util-linux >/dev/null
     if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
         DEBIAN_FRONTEND=noninteractive apt_get install -y -qq docker.io >/dev/null 2>&1 || true
         DEBIAN_FRONTEND=noninteractive apt_get install -y -qq docker-compose-v2 >/dev/null 2>&1 || \
@@ -572,7 +785,7 @@ EOF
         DEBIAN_FRONTEND=noninteractive apt_get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin >/dev/null
     fi
 else
-    dnf install -y ca-certificates curl wget jq iproute ipset iptables tar gzip openssl util-linux >/dev/null
+    dnf install -y ca-certificates curl wget jq iproute ipset iptables kmod tar gzip openssl util-linux >/dev/null
     dnf install -y docker docker-compose-plugin >/dev/null 2>&1 || true
     if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
         DOCKER_OS=rhel
@@ -603,7 +816,8 @@ if [[ -f "$CONFIG_DIR/config.toml" ]]; then
     BACKUP_ITEMS=()
     for item in opt/telemt/config opt/telemt/.env opt/telemt/docker-compose.yml opt/telemt/bin opt/telemt/node-exporter usr/bin/node_exporter opt/telemt/install.sh opt/telemt/update.sh opt/telemt/uninstall.sh opt/telemt/doctor.sh opt/telemt/backup.sh opt/telemt/VERSION opt/telemt/INSTALLATION-SUMMARY.txt opt/telemt/README.md opt/telemt/LICENSE opt/telemt/CHANGELOG.md; do [[ -e "/$item" ]] && BACKUP_ITEMS+=("$item"); done
     [[ -d /opt/telemt/stub ]] && BACKUP_ITEMS+=(opt/telemt/stub)
-    for unit in etc/systemd/system/telemt-firewall.service etc/systemd/system/telemt-geoblock.service etc/systemd/system/telemt-geoblock.timer etc/systemd/system/telemt-stub-cert.service etc/systemd/system/telemt-stub-cert.timer etc/systemd/system/telemt-node-exporter.service etc/systemd/system/node_exporter.service etc/systemd/system/telemt-auto-restart.service etc/systemd/system/telemt-auto-restart.timer; do [[ -f "/$unit" ]] && BACKUP_ITEMS+=("$unit"); done
+    [[ -d /opt/telemt/licenses ]] && BACKUP_ITEMS+=(opt/telemt/licenses)
+    for unit in etc/systemd/system/telemt-firewall.service etc/systemd/system/telemt-geoblock.service etc/systemd/system/telemt-geoblock.timer etc/systemd/system/telemt-stub-cert.service etc/systemd/system/telemt-stub-cert.timer etc/systemd/system/telemt-node-exporter.service etc/systemd/system/node_exporter.service etc/systemd/system/telemt-auto-restart.service etc/systemd/system/telemt-auto-restart.timer etc/systemd/system/telemt-mtproto-fix.service; do [[ -f "/$unit" ]] && BACKUP_ITEMS+=("$unit"); done
     tar -czf "$BACKUP_FILE" -C / "${BACKUP_ITEMS[@]}" 2>/dev/null || true
     ok "Предыдущая установка сохранена: $BACKUP_FILE"
 fi
@@ -795,6 +1009,9 @@ NODE_EXPORTER_PORT=$NODE_EXPORTER_PORT
 AUTO_RESTART_ENABLE=$AUTO_RESTART_ENABLE
 AUTO_RESTART_INTERVAL=$AUTO_RESTART_INTERVAL
 AUTO_RESTART_LABEL="$AUTO_RESTART_LABEL"
+MTPROTO_FIX_ENABLE=$MTPROTO_FIX_ENABLE
+MTPROTO_FIX_TYPE=$MTPROTO_FIX_TYPE
+MTPROTO_FIX_PORTS="$MTPROTO_FIX_PORTS"
 PUBLIC_HOST=$PUBLIC_HOST
 SERVER_IP=$SERVER_IP
 TLS_DOMAIN=$TLS_DOMAIN
@@ -1175,19 +1392,238 @@ systemctl enable telemt-firewall.service >/dev/null
 systemctl restart telemt-firewall.service
 GEOBLOCK_STATUS=disabled
 if [[ -n "$SELECTED_CODES" ]]; then
-    if systemctl start telemt-geoblock.service; then
-        GEOBLOCK_STATUS=active
+    GEO_START_OK=false; GEO_FINISHED=false; GEO_STATE=unknown; GEO_RESULT=unknown
+    if systemctl start --no-block telemt-geoblock.service; then GEO_START_OK=true; fi
+    if [[ "$GEO_START_OK" == true ]]; then
+        info "GeoBlock загружается в фоне; ожидаю быстрый результат до 1 минуты"
+        for _ in {1..12}; do
+            GEO_STATE=$(systemctl show telemt-geoblock.service -p ActiveState --value 2>/dev/null || echo unknown)
+            GEO_RESULT=$(systemctl show telemt-geoblock.service -p Result --value 2>/dev/null || echo unknown)
+            if [[ "$GEO_STATE" == inactive && "$GEO_RESULT" == success ]]; then GEO_FINISHED=true; GEOBLOCK_STATUS=active; break; fi
+            if [[ "$GEO_STATE" == failed || "$GEO_RESULT" == failed || "$GEO_RESULT" == exit-code ]]; then GEO_FINISHED=true; GEOBLOCK_STATUS=deferred; break; fi
+            sleep 5
+        done
+    fi
+    if [[ "$GEOBLOCK_STATUS" == active ]]; then
         ok "GeoBlock применён атомарно: $SELECTED_NAMES"
+    elif [[ "$GEO_START_OK" == true && "$GEO_FINISHED" == false ]]; then
+        GEOBLOCK_STATUS=background
+        warn "GeoBlock продолжает загрузку в фоне; установка Telemt не блокируется"
+        hint "Проверка после установки: sudo systemctl status telemt-geoblock.service"
     else
         GEOBLOCK_STATUS=deferred
-        warn "GeoBlock пока не обновлён; прежний набор сохранён, таймер повторит загрузку автоматически"
+        warn "GeoBlock пока не обновлён; прежний набор сохранён, следующая попытка будет по таймеру"
         journalctl -u telemt-geoblock.service -n 8 --no-pager || true
     fi
-    systemctl enable --now telemt-geoblock.timer >/dev/null
+    systemctl enable telemt-geoblock.timer >/dev/null 2>&1 || { sleep 2; systemctl enable telemt-geoblock.timer >/dev/null; }
+    systemctl start --no-block telemt-geoblock.timer >/dev/null 2>&1 || { sleep 2; systemctl start --no-block telemt-geoblock.timer >/dev/null || warn "GeoBlock timer будет активирован после перезагрузки"; }
 else
     systemctl disable --now telemt-geoblock.timer >/dev/null 2>&1 || true
 fi
 ok "TCP/$PORT открыт; SSH ${SSH_PORTS} исключены из региональной блокировки"
+
+step "MTProto FIX V3 iptables"
+cat > "$INSTALL_ROOT/bin/mtproto-fix.sh" <<'MTPROTOFIX'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# V3 algorithm adapted from MTPROTO_FIX_By_MEKO (c) 2026 MEKO.
+# The original license is installed in /opt/telemt/licenses/MTPROTO_FIX_By_MEKO-LICENSE.txt.
+ROOT=/opt/telemt
+ENV_FILE=$ROOT/config/installer.env
+FILTER_CHAIN=TELEMT_MTPROTO_FIX
+MANGLE_CHAIN=TELEMT_MTPROTO_MARK
+U32_PATTERN='32 & 0x000FFFFF = 0x0002FFFF && 40 & 0xFF000000 = 0x02000000 && 44 & 0xFFFF0000 = 0x01030000 && 48 & 0xFFFFFF00 = 0x01010800 && 60 & 0xFFFFFFFF = 0x04020000'
+
+[[ $(id -u) -eq 0 ]] || { echo "Запустите от root: sudo mtproto fix" >&2; exit 1; }
+. "$ENV_FILE"
+MTPROTO_FIX_ENABLE=${MTPROTO_FIX_ENABLE:-false}
+MTPROTO_FIX_TYPE=${MTPROTO_FIX_TYPE:-v3}
+MTPROTO_FIX_PORTS=${MTPROTO_FIX_PORTS:-${PORT:-443}}
+
+validate_ports() {
+    local raw=${1//[[:space:]]/} item normalized=""
+    local -a values=()
+    local -A seen=()
+    IFS=',' read -ra values <<< "$raw"
+    [[ ${#values[@]} -gt 0 ]] || return 1
+    for item in "${values[@]}"; do
+        [[ "$item" =~ ^[0-9]+$ ]] && (( item >= 1 && item <= 65535 )) || return 1
+        [[ -n "${seen[$item]:-}" ]] && continue
+        seen[$item]=1
+        normalized+="${normalized:+,}${item}"
+    done
+    [[ -n "$normalized" ]] || return 1
+    printf '%s\n' "$normalized"
+}
+
+save_setting() {
+    local enabled=$1 ports=$2
+    sed -i "s/^MTPROTO_FIX_ENABLE=.*/MTPROTO_FIX_ENABLE=$enabled/" "$ENV_FILE"
+    sed -i 's/^MTPROTO_FIX_TYPE=.*/MTPROTO_FIX_TYPE=v3/' "$ENV_FILE"
+    sed -i "s/^MTPROTO_FIX_PORTS=.*/MTPROTO_FIX_PORTS=\"$ports\"/" "$ENV_FILE"
+    chmod 600 "$ENV_FILE"
+}
+
+delete_hooks() {
+    while iptables -w 5 -C INPUT -j "$FILTER_CHAIN" 2>/dev/null; do iptables -w 5 -D INPUT -j "$FILTER_CHAIN"; done
+    while iptables -w 5 -t mangle -C PREROUTING -j "$MANGLE_CHAIN" 2>/dev/null; do iptables -w 5 -t mangle -D PREROUTING -j "$MANGLE_CHAIN"; done
+}
+
+remove_rules() {
+    delete_hooks
+    if iptables -w 5 -L "$FILTER_CHAIN" -n >/dev/null 2>&1; then
+        iptables -w 5 -F "$FILTER_CHAIN"
+        iptables -w 5 -X "$FILTER_CHAIN"
+    fi
+    if iptables -w 5 -t mangle -L "$MANGLE_CHAIN" -n >/dev/null 2>&1; then
+        iptables -w 5 -t mangle -F "$MANGLE_CHAIN"
+        iptables -w 5 -t mangle -X "$MANGLE_CHAIN"
+    fi
+}
+
+apply_rules() {
+    local ports item
+    ports=$(validate_ports "${1:-$MTPROTO_FIX_PORTS}") || { echo "Порты должны быть в диапазоне 1–65535 и разделены запятыми" >&2; return 2; }
+    command -v iptables >/dev/null 2>&1 || { echo "iptables не установлен" >&2; return 1; }
+    if iptables -w 5 -C INPUT -j MTPR_SYNFIX 2>/dev/null; then
+        echo "Обнаружен уже подключённый внешний MTPR_SYNFIX. Сначала удалите его через mekopr, чтобы два FIX не конфликтовали." >&2
+        return 1
+    fi
+    command -v modprobe >/dev/null 2>&1 && modprobe xt_u32 2>/dev/null || true
+    iptables -m u32 -h >/dev/null 2>&1 || { echo "Ядро/iptables не поддерживает xt_u32, необходимый для V3" >&2; return 1; }
+    iptables -m hashlimit -h >/dev/null 2>&1 || { echo "Ядро/iptables не поддерживает hashlimit" >&2; return 1; }
+
+    delete_hooks
+    iptables -w 5 -N "$FILTER_CHAIN" 2>/dev/null || true
+    iptables -w 5 -F "$FILTER_CHAIN"
+    iptables -w 5 -t mangle -N "$MANGLE_CHAIN" 2>/dev/null || true
+    iptables -w 5 -t mangle -F "$MANGLE_CHAIN"
+
+    IFS=',' read -ra values <<< "$ports"
+    for item in "${values[@]}"; do
+        # V3: сигнатура u32 маркирует только SYN выбранного TCP-порта.
+        iptables -w 5 -t mangle -A "$MANGLE_CHAIN" -p tcp --syn --dport "$item" \
+            -m u32 --u32 "$U32_PATTERN" -j MARK --set-mark 0x400
+        # RETURN передаёт разрешённый SYN основной защите Telemt/GeoBlock.
+        iptables -w 5 -A "$FILTER_CHAIN" -p tcp --syn --dport "$item" -m mark --mark 0x400 -j RETURN
+        iptables -w 5 -A "$FILTER_CHAIN" -p tcp --syn --dport "$item" \
+            -m hashlimit --hashlimit-name "mtproto_$item" --hashlimit-mode srcip \
+            --hashlimit-upto 54/minute --hashlimit-burst 1 \
+            --hashlimit-htable-expire 60000 --hashlimit-htable-size 32768 -j RETURN
+        iptables -w 5 -A "$FILTER_CHAIN" -p tcp --syn --dport "$item" -j REJECT --reject-with tcp-reset
+    done
+    iptables -w 5 -A "$FILTER_CHAIN" -j RETURN
+    iptables -w 5 -t mangle -A "$MANGLE_CHAIN" -j RETURN
+    iptables -w 5 -t mangle -I PREROUTING 1 -j "$MANGLE_CHAIN"
+    iptables -w 5 -I INPUT 1 -j "$FILTER_CHAIN"
+    echo "MTProto FIX V3 применён к TCP: $ports"
+}
+
+show_status() {
+    echo "MTProto FIX: $([[ "$MTPROTO_FIX_ENABLE" == true ]] && echo "включён" || echo "выключен")"
+    echo "Тип: V3 iptables/u32"
+    echo "Порты: ${MTPROTO_FIX_PORTS:-не заданы}"
+    systemctl is-enabled --quiet telemt-mtproto-fix.service 2>/dev/null && echo "Автозапуск: включён" || echo "Автозапуск: выключен"
+    systemctl is-active --quiet telemt-mtproto-fix.service 2>/dev/null && echo "Сервис: active" || echo "Сервис: inactive"
+    if iptables -w 5 -C INPUT -j "$FILTER_CHAIN" 2>/dev/null && iptables -w 5 -t mangle -C PREROUTING -j "$MANGLE_CHAIN" 2>/dev/null; then
+        echo "Правила: активны"
+        iptables -w 5 -L "$FILTER_CHAIN" -n -v --line-numbers
+    else
+        echo "Правила: не активны"
+        return 1
+    fi
+}
+
+install_fix() {
+    local ports
+    ports=$(validate_ports "${1:-$MTPROTO_FIX_PORTS}") || { echo "Некорректный список портов" >&2; return 2; }
+    apply_rules "$ports"
+    save_setting true "$ports"
+    systemctl enable telemt-mtproto-fix.service >/dev/null
+    systemctl restart telemt-mtproto-fix.service
+    MTPROTO_FIX_ENABLE=true; MTPROTO_FIX_PORTS=$ports
+    echo "Автозапуск MTProto FIX V3 включён"
+}
+
+uninstall_fix() {
+    systemctl disable --now telemt-mtproto-fix.service >/dev/null 2>&1 || true
+    remove_rules
+    save_setting false "${MTPROTO_FIX_PORTS:-${PORT:-443}}"
+    MTPROTO_FIX_ENABLE=false
+    echo "MTProto FIX удалён; Telemt и основной firewall не изменены"
+}
+
+menu() {
+    local choice ports answer
+    echo ""
+    echo "MTProto FIX V3 iptables"
+    echo "  1) Статус"
+    echo "  2) Установить или применить повторно"
+    echo "  3) Удалить FIX"
+    echo "  0) Выход"
+    read -rp "Выбор [1]: " choice; choice=${choice:-1}
+    case "$choice" in
+        1) show_status ;;
+        2)
+            read -rp "Порт или порты через запятую [${MTPROTO_FIX_PORTS:-${PORT:-443}}]: " ports
+            ports=${ports:-${MTPROTO_FIX_PORTS:-${PORT:-443}}}
+            ports=$(validate_ports "$ports") || { echo "Некорректный список портов" >&2; return 2; }
+            echo "Будут созданы V3 u32/hashlimit правила для TCP: $ports"
+            read -rp "Продолжить? [Y/n]: " answer; answer=${answer:-Y}
+            [[ "$answer" =~ ^[YyДд]$ ]] && install_fix "$ports" || echo "Отменено"
+            ;;
+        3)
+            read -rp "Удалить только MTProto FIX? [y/N]: " answer
+            [[ "$answer" =~ ^[YyДд]$ ]] && uninstall_fix || echo "Отменено"
+            ;;
+        0) return 0 ;;
+        *) echo "Неизвестный пункт" >&2; return 2 ;;
+    esac
+}
+
+case "${1:-menu}" in
+    menu) menu ;;
+    status) show_status ;;
+    install) install_fix "${2:-$MTPROTO_FIX_PORTS}" ;;
+    apply|reapply) apply_rules "${2:-$MTPROTO_FIX_PORTS}" ;;
+    remove|uninstall) uninstall_fix ;;
+    *) echo "Usage: mtproto fix [status|install [PORTS]|apply [PORTS]|remove]" >&2; exit 2 ;;
+esac
+MTPROTOFIX
+if [[ -f "${SOURCE_DIR}/mtproto-fix.sh" ]]; then
+    safe_install 700 "${SOURCE_DIR}/mtproto-fix.sh" "$INSTALL_ROOT/bin/mtproto-fix.sh"
+else
+    chmod 700 "$INSTALL_ROOT/bin/mtproto-fix.sh"
+fi
+
+mkdir -p "$INSTALL_ROOT/licenses"
+chmod 700 "$INSTALL_ROOT/licenses"
+if [[ -f "${SOURCE_DIR:-}/THIRD_PARTY_LICENSES/MTPROTO_FIX_By_MEKO-LICENSE.txt" ]]; then
+    safe_install 600 "${SOURCE_DIR}/THIRD_PARTY_LICENSES/MTPROTO_FIX_By_MEKO-LICENSE.txt" "$INSTALL_ROOT/licenses/MTPROTO_FIX_By_MEKO-LICENSE.txt"
+fi
+
+cat > /etc/systemd/system/telemt-mtproto-fix.service <<'UNIT'
+[Unit]
+Description=Telemt MTProto FIX V3 iptables rules
+Documentation=https://github.com/Mekotofeuka/MTPROTO_FIX_By_MEKO
+After=network-online.target docker.service telemt-firewall.service
+Wants=network-online.target docker.service
+[Service]
+Type=oneshot
+ExecStart=/opt/telemt/bin/mtproto-fix.sh apply
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+if [[ "$MTPROTO_FIX_ENABLE" == true ]]; then
+    "$INSTALL_ROOT/bin/mtproto-fix.sh" install "$MTPROTO_FIX_PORTS"
+    ok "MTProto FIX V3 активен на TCP: $MTPROTO_FIX_PORTS"
+else
+    "$INSTALL_ROOT/bin/mtproto-fix.sh" remove >/dev/null 2>&1 || true
+    ok "MTProto FIX не установлен"
+fi
 
 step "Fail2ban"
 if [[ "$FAIL2BAN_ENABLE" == true ]]; then
@@ -1481,6 +1917,9 @@ NODE_EXPORTER_PORT=${NODE_EXPORTER_PORT:-9100}
 AUTO_RESTART_ENABLE=${AUTO_RESTART_ENABLE:-false}
 AUTO_RESTART_INTERVAL=${AUTO_RESTART_INTERVAL:-disabled}
 AUTO_RESTART_LABEL=${AUTO_RESTART_LABEL:-не требуется}
+MTPROTO_FIX_ENABLE=${MTPROTO_FIX_ENABLE:-false}
+MTPROTO_FIX_TYPE=${MTPROTO_FIX_TYPE:-v3}
+MTPROTO_FIX_PORTS=${MTPROTO_FIX_PORTS:-${PORT:-443}}
 TLS_DOMAIN=${TLS_DOMAIN:-не задан}
 INSTALLER_VERSION=$(cat "$ROOT/VERSION" 2>/dev/null || echo unknown)
 api() { curl -fsS "http://127.0.0.1:9091/v1/${1}"; }
@@ -1514,10 +1953,11 @@ backup() {
     local doc
     for doc in opt/telemt/README.md opt/telemt/LICENSE opt/telemt/CHANGELOG.md; do [[ -f "/$doc" ]] && items+=("$doc"); done
     [[ -d /opt/telemt/stub ]] && items+=(opt/telemt/stub)
+    [[ -d /opt/telemt/licenses ]] && items+=(opt/telemt/licenses)
     [[ -d /opt/telemt/node-exporter ]] && items+=(opt/telemt/node-exporter)
     [[ -f /usr/bin/node_exporter ]] && items+=(usr/bin/node_exporter)
     local unit
-    for unit in etc/systemd/system/telemt-firewall.service etc/systemd/system/telemt-geoblock.service etc/systemd/system/telemt-geoblock.timer etc/systemd/system/telemt-geoblock-resume.service etc/systemd/system/telemt-geoblock-resume.timer etc/systemd/system/telemt-stub-cert.service etc/systemd/system/telemt-stub-cert.timer etc/systemd/system/telemt-node-exporter.service etc/systemd/system/node_exporter.service etc/systemd/system/telemt-auto-restart.service etc/systemd/system/telemt-auto-restart.timer; do [[ -f "/$unit" ]] && items+=("$unit"); done
+    for unit in etc/systemd/system/telemt-firewall.service etc/systemd/system/telemt-geoblock.service etc/systemd/system/telemt-geoblock.timer etc/systemd/system/telemt-geoblock-resume.service etc/systemd/system/telemt-geoblock-resume.timer etc/systemd/system/telemt-stub-cert.service etc/systemd/system/telemt-stub-cert.timer etc/systemd/system/telemt-node-exporter.service etc/systemd/system/node_exporter.service etc/systemd/system/telemt-auto-restart.service etc/systemd/system/telemt-auto-restart.timer etc/systemd/system/telemt-mtproto-fix.service; do [[ -f "/$unit" ]] && items+=("$unit"); done
     mkdir -p "$ROOT/backups"; tar -czf "$out" -C / "${items[@]}"; chmod 600 "$out"; echo "$out"
 }
 valid_backup() {
@@ -1525,7 +1965,7 @@ valid_backup() {
     while IFS= read -r entry; do
         [[ "$entry" == /* || "$entry" == *".."* ]] && return 1
         case "$entry" in
-            opt/telemt/config|opt/telemt/config/*|opt/telemt/.env|opt/telemt/docker-compose.yml|opt/telemt/bin|opt/telemt/bin/*|opt/telemt/node-exporter|opt/telemt/node-exporter/*|usr/bin/node_exporter|opt/telemt/install.sh|opt/telemt/update.sh|opt/telemt/uninstall.sh|opt/telemt/doctor.sh|opt/telemt/backup.sh|opt/telemt/VERSION|opt/telemt/INSTALLATION-SUMMARY.txt|opt/telemt/README.md|opt/telemt/LICENSE|opt/telemt/CHANGELOG.md|opt/telemt/stub|opt/telemt/stub/*|etc/systemd/system/telemt-firewall.service|etc/systemd/system/telemt-geoblock.service|etc/systemd/system/telemt-geoblock.timer|etc/systemd/system/telemt-geoblock-resume.service|etc/systemd/system/telemt-geoblock-resume.timer|etc/systemd/system/telemt-stub-cert.service|etc/systemd/system/telemt-stub-cert.timer|etc/systemd/system/telemt-node-exporter.service|etc/systemd/system/node_exporter.service|etc/systemd/system/telemt-auto-restart.service|etc/systemd/system/telemt-auto-restart.timer) found=true ;;
+            opt/telemt/config|opt/telemt/config/*|opt/telemt/.env|opt/telemt/docker-compose.yml|opt/telemt/bin|opt/telemt/bin/*|opt/telemt/node-exporter|opt/telemt/node-exporter/*|usr/bin/node_exporter|opt/telemt/install.sh|opt/telemt/update.sh|opt/telemt/uninstall.sh|opt/telemt/doctor.sh|opt/telemt/backup.sh|opt/telemt/VERSION|opt/telemt/INSTALLATION-SUMMARY.txt|opt/telemt/README.md|opt/telemt/LICENSE|opt/telemt/CHANGELOG.md|opt/telemt/stub|opt/telemt/stub/*|opt/telemt/licenses|opt/telemt/licenses/*|etc/systemd/system/telemt-firewall.service|etc/systemd/system/telemt-geoblock.service|etc/systemd/system/telemt-geoblock.timer|etc/systemd/system/telemt-geoblock-resume.service|etc/systemd/system/telemt-geoblock-resume.timer|etc/systemd/system/telemt-stub-cert.service|etc/systemd/system/telemt-stub-cert.timer|etc/systemd/system/telemt-node-exporter.service|etc/systemd/system/node_exporter.service|etc/systemd/system/telemt-auto-restart.service|etc/systemd/system/telemt-auto-restart.timer|etc/systemd/system/telemt-mtproto-fix.service) found=true ;;
             *) return 1 ;;
         esac
     done < <(tar -tzf "$archive")
@@ -1545,6 +1985,8 @@ Telemt Installer — команды управления
 Состояние и диагностика:
   mtproto status               Состояние контейнеров
   mtproto restart-schedule     Интервал и следующий плановый перезапуск
+  mtproto fix                  Интерактивное меню MTProto FIX V3 iptables
+  mtproto fix status           Состояние, порты и счётчики правил FIX
   mtproto doctor               Полная автоматическая диагностика
   mtproto ports                Порты, сокеты и правила firewall
   mtproto logs [N]             Последние N строк журнала Telemt
@@ -1576,7 +2018,7 @@ case "${1:-}" in
   start) maintenance_lock; "${COMPOSE[@]}" up -d; if [[ "$NODE_EXPORTER_ENABLE" == true ]]; then systemctl start node_exporter.service; fi ;;
   stop) maintenance_lock; "${COMPOSE[@]}" stop; if [[ "$NODE_EXPORTER_ENABLE" == true ]]; then systemctl stop node_exporter.service; fi ;;
   restart) maintenance_lock; "${COMPOSE[@]}" up -d --force-recreate; if [[ "$NODE_EXPORTER_ENABLE" == true ]]; then systemctl restart node_exporter.service; fi; wait_healthy ;;
-  status) "${COMPOSE[@]}" ps; if [[ "$NODE_EXPORTER_ENABLE" == true ]]; then systemctl status node_exporter.service --no-pager -l; fi; if [[ "$AUTO_RESTART_ENABLE" == true ]]; then systemctl status telemt-auto-restart.timer --no-pager -l; fi ;;
+  status) "${COMPOSE[@]}" ps; if [[ "$NODE_EXPORTER_ENABLE" == true ]]; then systemctl status node_exporter.service --no-pager -l; fi; if [[ "$AUTO_RESTART_ENABLE" == true ]]; then systemctl status telemt-auto-restart.timer --no-pager -l; fi; if [[ "$MTPROTO_FIX_ENABLE" == true ]]; then /opt/telemt/bin/mtproto-fix.sh status; fi ;;
   restart-schedule)
     if [[ "$AUTO_RESTART_ENABLE" == true ]]; then
       echo "Плановый перезапуск: каждые $AUTO_RESTART_LABEL ($AUTO_RESTART_INTERVAL)"
@@ -1584,6 +2026,10 @@ case "${1:-}" in
     else
       echo "Плановый перезапуск Telemt отключён"
     fi
+    ;;
+  fix)
+    shift
+    if (( $# == 0 )); then exec /opt/telemt/bin/mtproto-fix.sh menu; else exec /opt/telemt/bin/mtproto-fix.sh "$@"; fi
     ;;
   logs) "${COMPOSE[@]}" logs --tail "${2:-100}" telemt ;;
   link|links) telegram_links ;;
@@ -1609,6 +2055,7 @@ case "${1:-}" in
     echo "Proxy Secret: $secret"
     echo "Ad-tag: ${adtag:-не задан}"
     echo "Плановый перезапуск: $AUTO_RESTART_LABEL"
+    echo "MTProto FIX: $([[ "$MTPROTO_FIX_ENABLE" == true ]] && echo "V3 iptables, TCP $MTPROTO_FIX_PORTS" || echo "выключен")"
     echo "GeoBlock: $([[ -n "$GEO_COUNTRIES" ]] && echo "активен, scope=$GEO_SCOPE" || echo "выключен")"
     echo "IPv6: $IPV6_MODE; SSH всегда разрешён на TCP: $SSH_PORTS"
     echo
@@ -1633,6 +2080,7 @@ case "${1:-}" in
     echo
     echo "== ПОРТЫ =="
     echo "TCP/$PORT — Telemt, публичный"
+    [[ "$MTPROTO_FIX_ENABLE" == true ]] && echo "MTProto FIX V3: TCP $MTPROTO_FIX_PORTS"
     echo "TCP/9091 — API Telemt, только localhost"
     [[ "$STUB_ENABLE" == true ]] && echo "TCP/$STUB_PORT — Nginx-заглушка, только localhost"
     [[ "$STUB_ENABLE" == true ]] && echo "TCP/80 — ACME/Let's Encrypt, временно при выпуске и продлении"
@@ -1641,7 +2089,7 @@ case "${1:-}" in
     [[ "$GEO_ENABLE" == true ]] && echo "TCP/$GEO_METRICS_PORT — GeoIP exporter"
     [[ "$NODE_EXPORTER_ENABLE" == true ]] && echo "TCP/$NODE_EXPORTER_PORT — node_exporter"
     echo
-    echo "Команды: mtproto help | links | ports | doctor | status | restart-schedule | logs | sponsor | backup"
+    echo "Команды: mtproto help | links | ports | doctor | status | fix | restart-schedule | logs | sponsor | backup"
     ;;
   sponsor)
     middle=$(awk '/^\[general\]/{inside=1;next} /^\[/{inside=0} inside && /^use_middle_proxy[[:space:]]*=/{gsub(/[[:space:]]/,"",$0); sub(/^use_middle_proxy=/,""); print; exit}' "$CONFIG")
@@ -1712,6 +2160,7 @@ case "${1:-}" in
     echo
     echo "== Installer firewall rules =="
     iptables -S TELEMT_GUARD4 2>/dev/null || echo "TELEMT_GUARD4 is not active"
+    iptables -S TELEMT_MTPROTO_FIX 2>/dev/null || echo "MTProto FIX is not active"
     ;;
   api) api "${2:-health}" | jq . ;;
   users) api users | jq . ;;
@@ -1719,6 +2168,8 @@ case "${1:-}" in
   config) sed -E 's/(proxy = ")[0-9a-f]+/\1***REDACTED***/' "$CONFIG" ;;
   firewall)
     iptables -L TELEMT_GUARD4 -n --line-numbers
+    iptables -L TELEMT_MTPROTO_FIX -n -v --line-numbers 2>/dev/null || true
+    iptables -t mangle -L TELEMT_MTPROTO_MARK -n -v --line-numbers 2>/dev/null || true
     [[ "$IPV6_MODE" != disabled ]] && ip6tables -L TELEMT_GUARD6 -n --line-numbers || true
     ipset list telemt_geo4 | awk '/Name:|Number of entries:/'
     ;;
@@ -1788,6 +2239,14 @@ case "${1:-}" in
       systemctl is-enabled --quiet telemt-auto-restart.timer && systemctl is-active --quiet telemt-auto-restart.timer && echo "OK: auto-restart timer active ($AUTO_RESTART_LABEL)" || { echo "FAIL: auto-restart timer"; failures=$((failures+1)); }
       systemctl list-timers telemt-auto-restart.timer --no-pager || true
     fi
+    if [[ "$MTPROTO_FIX_ENABLE" == true ]]; then
+      systemctl is-enabled --quiet telemt-mtproto-fix.service && systemctl is-active --quiet telemt-mtproto-fix.service && echo "OK: MTProto FIX V3 service active (TCP $MTPROTO_FIX_PORTS)" || { echo "FAIL: MTProto FIX service"; failures=$((failures+1)); }
+      iptables -C INPUT -j TELEMT_MTPROTO_FIX >/dev/null 2>&1 && iptables -t mangle -C PREROUTING -j TELEMT_MTPROTO_MARK >/dev/null 2>&1 && echo "OK: MTProto FIX chains attached" || { echo "FAIL: MTProto FIX chains"; failures=$((failures+1)); }
+      IFS=',' read -ra fix_doctor_ports <<< "$MTPROTO_FIX_PORTS"
+      for fix_doctor_port in "${fix_doctor_ports[@]}"; do
+        iptables -C TELEMT_MTPROTO_FIX -p tcp --syn --dport "$fix_doctor_port" -j REJECT --reject-with tcp-reset >/dev/null 2>&1 && echo "OK: MTProto FIX TCP/$fix_doctor_port reject layer" || { echo "FAIL: MTProto FIX TCP/$fix_doctor_port"; failures=$((failures+1)); }
+      done
+    fi
     if [[ "$STUB_ENABLE" == true ]]; then
       curl -kfsS --resolve "$STUB_DOMAIN:$STUB_PORT:127.0.0.1" "https://$STUB_DOMAIN:$STUB_PORT/" >/dev/null && echo "OK: Nginx stub direct" || { echo "FAIL: Nginx stub"; failures=$((failures+1)); }
       curl -kfsS --resolve "$STUB_DOMAIN:$PORT:127.0.0.1" "https://$STUB_DOMAIN:$PORT/" >/dev/null && echo "OK: stub through Telemt" || { echo "FAIL: mask relay"; failures=$((failures+1)); }
@@ -1823,6 +2282,7 @@ case "${1:-}" in
       systemctl enable --now node_exporter.service >/dev/null 2>&1 || true
     fi
     [[ "$AUTO_RESTART_ENABLE" == true ]] && systemctl enable --now telemt-auto-restart.timer >/dev/null 2>&1 || true
+    [[ "$MTPROTO_FIX_ENABLE" == true ]] && systemctl enable --now telemt-mtproto-fix.service >/dev/null 2>&1 || true
     if [[ "$STUB_ENABLE" == true ]]; then chown "$STUB_OWNER:$(id -gn "$STUB_OWNER")" /opt/telemt/stub/html /opt/telemt/stub/html/index.html; /opt/telemt/bin/stub-cert.sh provision; systemctl enable --now telemt-stub-cert.timer >/dev/null 2>&1 || true; fi
     "${COMPOSE[@]}" up -d --force-recreate; wait_healthy
     ;;
@@ -1844,7 +2304,7 @@ case "${1:-}" in
     confirmed=false
     for arg in "$@"; do [[ "$arg" == --yes ]] && confirmed=true; done
     if [[ "$confirmed" == false ]]; then
-        echo "Будут безвозвратно удалены контейнеры Telemt, GeoBlock/firewall, node_exporter, unit-файлы, jail Fail2ban, сертификат заглушки, /opt/telemt и legacy-каталоги /opt/mtg, /opt/geo-exporter."
+        echo "Будут безвозвратно удалены контейнеры Telemt, MTProto FIX, GeoBlock/firewall, node_exporter, unit-файлы, jail Fail2ban, сертификат заглушки, /opt/telemt и legacy-каталоги /opt/mtg, /opt/geo-exporter."
         echo "Общесистемные пакеты Docker, Fail2ban и Certbot останутся, поскольку могут использоваться другими приложениями."
         read -rp "Для полного удаления введите DELETE: " answer
         [[ "$answer" == DELETE ]] || { echo "Удаление отменено"; exit 0; }
@@ -1861,11 +2321,12 @@ case "${1:-}" in
     "${COMPOSE[@]}" down --remove-orphans --volumes || true
     docker rm -f telemt telemt-stub geo-exporter mtprotoproxy mtproto-proxy >/dev/null 2>&1 || true
     /opt/telemt/bin/firewall.sh remove || true
-    for unit_name in telemt-firewall.service telemt-geoblock.service telemt-geoblock.timer telemt-geoblock-resume.service telemt-geoblock-resume.timer telemt-stub-cert.service telemt-stub-cert.timer telemt-node-exporter.service telemt-auto-restart.service telemt-auto-restart.timer; do
+    /opt/telemt/bin/mtproto-fix.sh remove >/dev/null 2>&1 || true
+    for unit_name in telemt-firewall.service telemt-geoblock.service telemt-geoblock.timer telemt-geoblock-resume.service telemt-geoblock-resume.timer telemt-stub-cert.service telemt-stub-cert.timer telemt-node-exporter.service telemt-auto-restart.service telemt-auto-restart.timer telemt-mtproto-fix.service; do
         systemctl disable --now "$unit_name" >/dev/null 2>&1 || systemctl stop "$unit_name" >/dev/null 2>&1 || true
     done
     [[ "$node_owned" == true ]] && systemctl disable --now node_exporter.service >/dev/null 2>&1 || true
-    for unit in /etc/systemd/system/telemt-firewall.service /etc/systemd/system/telemt-geoblock.service /etc/systemd/system/telemt-geoblock.timer /etc/systemd/system/telemt-geoblock-resume.service /etc/systemd/system/telemt-geoblock-resume.timer /etc/systemd/system/telemt-stub-cert.service /etc/systemd/system/telemt-stub-cert.timer /etc/systemd/system/telemt-node-exporter.service /etc/systemd/system/telemt-auto-restart.service /etc/systemd/system/telemt-auto-restart.timer; do [[ -e "$unit" || -L "$unit" ]] && unlink "$unit"; done
+    for unit in /etc/systemd/system/telemt-firewall.service /etc/systemd/system/telemt-geoblock.service /etc/systemd/system/telemt-geoblock.timer /etc/systemd/system/telemt-geoblock-resume.service /etc/systemd/system/telemt-geoblock-resume.timer /etc/systemd/system/telemt-stub-cert.service /etc/systemd/system/telemt-stub-cert.timer /etc/systemd/system/telemt-node-exporter.service /etc/systemd/system/telemt-auto-restart.service /etc/systemd/system/telemt-auto-restart.timer /etc/systemd/system/telemt-mtproto-fix.service; do [[ -e "$unit" || -L "$unit" ]] && unlink "$unit"; done
     if [[ "$node_owned" == true ]]; then
         [[ -e /etc/systemd/system/node_exporter.service || -L /etc/systemd/system/node_exporter.service ]] && unlink /etc/systemd/system/node_exporter.service
         [[ -e /usr/bin/node_exporter ]] && unlink /usr/bin/node_exporter
@@ -1915,6 +2376,8 @@ WRAPPER
 chmod 700 "$INSTALL_ROOT/update.sh" "$INSTALL_ROOT/uninstall.sh" "$INSTALL_ROOT/doctor.sh" "$INSTALL_ROOT/backup.sh"
 ok "Сервисные скрипты созданы в $INSTALL_ROOT"
 
+STEP_HEARTBEAT=false
+phase "ПРОВЕРКА СИСТЕМЫ" "Запуск контейнеров, healthcheck и итоговая диагностика."
 step "Запуск и проверка"
 cd "$INSTALL_ROOT"
 docker rm -f telemt telemt-stub geo-exporter mtprotoproxy mtproto-proxy >/dev/null 2>&1 || true
@@ -1949,6 +2412,7 @@ if [[ "$STUB_ENABLE" == true ]]; then
 fi
 mtproto doctor || warn "Doctor обнаружил предупреждения — смотрите вывод выше"
 
+phase "ГОТОВО" "Ссылки, команды и сохранённая памятка."
 step "Результат"
 LINK_OUTPUT=""; PROXY_LINKS=""
 for _ in {1..15}; do
@@ -1983,6 +2447,7 @@ SUMMARY_FILE="$INSTALL_ROOT/INSTALLATION-SUMMARY.txt"
     echo "Ad-tag: ${AD_TAG:-не задан}"
     echo "TLS domain: $TLS_DOMAIN"
     echo "Scheduled restart: $AUTO_RESTART_LABEL"
+    echo "MTProto FIX: $([[ "$MTPROTO_FIX_ENABLE" == true ]] && echo "V3 iptables; TCP $MTPROTO_FIX_PORTS" || echo "disabled")"
     echo ""
     echo "Telegram proxy links:"
     printf '%s\n' "$PROXY_LINKS"
@@ -2000,7 +2465,7 @@ SUMMARY_FILE="$INSTALL_ROOT/INSTALLATION-SUMMARY.txt"
     [[ -z "$NODE_EXPORTER_URL" ]] || echo "node_exporter v${NODE_EXPORTER_VERSION}: $NODE_EXPORTER_URL"
     [[ "$METRICS_REMOTE" == true ]] && echo "External metrics allow-list: IPv4 $GRAFANA_IP"
     echo ""
-    echo "Commands: mtproto help | credentials | secrets | links | sponsor | client-debug 120 | geoblock pause | restart-schedule | ports | doctor | status | logs | update | backup"
+    echo "Commands: mtproto help | credentials | secrets | links | fix | sponsor | client-debug 120 | geoblock pause | restart-schedule | ports | doctor | status | logs | update | backup"
 } > "$SUMMARY_FILE"
 chmod 600 "$SUMMARY_FILE"
 
@@ -2011,6 +2476,7 @@ result_line "Порт" "$PORT"
 result_line "Режим" "$MODE_LABEL"
 result_line "Proxy Secret" "$SECRET"
 result_line "Ad-tag" "${AD_TAG:-не задан}"
+result_line "MTProto FIX" "$([[ "$MTPROTO_FIX_ENABLE" == true ]] && echo "V3 iptables; TCP $MTPROTO_FIX_PORTS" || echo "выключен")"
 result_line "Автоперезапуск" "$AUTO_RESTART_LABEL"
 result_end
 result_begin "порты после установки"
@@ -2051,6 +2517,7 @@ echo -e "Диагностика iOS/клиента: ${CYAN}sudo mtproto client-d
 echo -e "Все файлы:               ${CYAN}${INSTALL_ROOT}${NC}"
 echo -e "Диагностика:             ${CYAN}sudo mtproto doctor${NC}"
 echo -e "Проверка портов:         ${CYAN}sudo mtproto ports${NC}"
+echo -e "Меню MTProto FIX:        ${CYAN}sudo mtproto fix${NC}"
 echo -e "Плановый перезапуск:     ${CYAN}sudo mtproto restart-schedule${NC} (${AUTO_RESTART_LABEL})"
 if [[ "$STUB_ENABLE" == true ]]; then
     echo -e "HTTPS-заглушка: ${CYAN}${SITE_URL}${NC} (сертификат: ${STUB_CERT_TYPE})"
